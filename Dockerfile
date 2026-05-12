@@ -131,7 +131,6 @@ RUN python3.10 -m pip install --force-reinstall --no-deps \
 # - disable public Gradio share links by default
 RUN python3.10 - <<'PY'
 from pathlib import Path
-import re
 
 for name in ["inference.py", "app.py"]:
     p = Path(name)
@@ -145,11 +144,13 @@ for name in ["inference.py", "app.py"]:
     )
 
     if name == "app.py":
-        text = re.sub(
-            r'\.launch\(([^)]*)\)',
-            ".launch(server_name=os.environ.get('GRADIO_SERVER_NAME', '0.0.0.0'), server_port=int(os.environ.get('GRADIO_SERVER_PORT', '7860')), share=os.environ.get('GRADIO_SHARE', '0') == '1', \\1)",
-            text,
-            count=1,
+        text = text.replace(
+            "app.launch(show_error=True, share=True)",
+            "app.launch(server_name=os.environ.get('GRADIO_SERVER_NAME', '0.0.0.0'), server_port=int(os.environ.get('GRADIO_SERVER_PORT', '7860')), show_error=True, share=os.environ.get('GRADIO_SHARE', '0') == '1')"
+        )
+        text = text.replace(
+            "app.launch(show_error=True)",
+            "app.launch(server_name=os.environ.get('GRADIO_SERVER_NAME', '0.0.0.0'), server_port=int(os.environ.get('GRADIO_SERVER_PORT', '7860')), show_error=True, share=os.environ.get('GRADIO_SHARE', '0') == '1')"
         )
 
     p.write_text(text)
