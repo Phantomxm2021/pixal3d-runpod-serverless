@@ -9,6 +9,9 @@ ENV DEBIAN_FRONTEND=noninteractive \
     HUGGINGFACE_HUB_CACHE=/runpod-volume/huggingface/hub \
     TORCH_HOME=/runpod-volume/torch \
     XDG_CACHE_HOME=/runpod-volume/cache \
+    GRADIO_SERVER_NAME=0.0.0.0 \
+    GRADIO_SERVER_PORT=7860 \
+    GRADIO_SHARE=0 \
     MAX_JOBS=4 \
     PIP_NO_CACHE_DIR=1 \
     FORCE_CUDA=1 \
@@ -122,10 +125,13 @@ RUN python3.10 -m pip install \
 RUN python3.10 -m pip install --force-reinstall --no-deps \
     "https://github.com/LDYang694/Storages/releases/download/20260430/utils3d-0.0.2-py3-none-any.whl"
 
-# Pixal3D hardcodes flash_attn_3 in its scripts at the time this image was authored.
-# Default to FlashAttention 2, while still allowing ATTN_BACKEND=flash_attn_3 on H100/Hopper builds.
+# Make Pixal3D friendlier for RunPod templates:
+# - do not hardcode flash_attn_3
+# - bind Gradio to 0.0.0.0:7860
+# - disable public Gradio share links by default
 RUN python3.10 - <<'PY'
 from pathlib import Path
+import re
 
 for name in ["inference.py", "app.py"]:
     p = Path(name)
@@ -137,10 +143,21 @@ for name in ["inference.py", "app.py"]:
         'os.environ["ATTN_BACKEND"] = "flash_attn_3"',
         'os.environ["ATTN_BACKEND"] = os.environ.get("ATTN_BACKEND", "flash_attn")'
     )
+
+    if name == "app.py":
+        text = re.sub(
+            r'\.launch\(([^)]*)\)',
+            ".launch(server_name=os.environ.get('GRADIO_SERVER_NAME', '0.0.0.0'), server_port=int(os.environ.get('GRADIO_SERVER_PORT', '7860')), share=os.environ.get('GRADIO_SHARE', '0') == '1', \\1)",
+            text,
+            count=1,
+        )
+
     p.write_text(text)
 PY
 
 COPY handler.py /app/handler.py
+COPY run_ui.sh /app/run_ui.sh
+RUN chmod +x /app/run_ui.sh
 
 WORKDIR /app
 
