@@ -10,7 +10,9 @@ ENV DEBIAN_FRONTEND=noninteractive \
     TORCH_HOME=/runpod-volume/torch \
     XDG_CACHE_HOME=/runpod-volume/cache \
     MAX_JOBS=4 \
-    PIP_NO_CACHE_DIR=1
+    PIP_NO_CACHE_DIR=1 \
+    FORCE_CUDA=1 \
+    TORCH_CUDA_ARCH_LIST="8.0;8.6;8.9;9.0"
 
 ENV PATH="${CUDA_HOME}/bin:${PATH}"
 ENV LD_LIBRARY_PATH="${CUDA_HOME}/lib64:${LD_LIBRARY_PATH}"
@@ -50,9 +52,50 @@ RUN git clone -b main https://github.com/microsoft/TRELLIS.2.git --recursive /ap
 
 WORKDIR /app/TRELLIS.2
 
-# Install TRELLIS.2 inference/runtime native deps.
-# FlashAttention is installed separately below so the backend can be controlled explicitly.
-RUN bash -lc ". ./setup.sh --basic --nvdiffrast --nvdiffrec --cumesh --o-voxel --flexgemm"
+# TRELLIS.2's setup.sh exits if nvidia-smi is not present. Cloud Docker builders
+# usually have the CUDA toolkit but no attached GPU, so install the same deps directly.
+RUN python3.10 -m pip install \
+    imageio \
+    imageio-ffmpeg \
+    tqdm \
+    easydict \
+    opencv-python-headless \
+    ninja \
+    trimesh \
+    transformers \
+    gradio==6.0.1 \
+    tensorboard \
+    pandas \
+    lpips \
+    zstandard \
+    kornia \
+    timm \
+    "git+https://github.com/EasternJournalist/utils3d.git@9a4eb15e4021b67b12c460c7057d642626897ec8"
+
+# setup.sh installs pillow-simd after libjpeg-dev. Keep this non-fatal because
+# some Python/package combinations may already have a compatible Pillow wheel.
+RUN python3.10 -m pip uninstall -y pillow || true \
+ && python3.10 -m pip install pillow-simd || python3.10 -m pip install pillow
+
+RUN mkdir -p /tmp/extensions \
+ && git clone -b v0.4.0 https://github.com/NVlabs/nvdiffrast.git /tmp/extensions/nvdiffrast \
+ && python3.10 -m pip install /tmp/extensions/nvdiffrast --no-build-isolation
+
+RUN mkdir -p /tmp/extensions \
+ && git clone -b renderutils https://github.com/JeffreyXiang/nvdiffrec.git /tmp/extensions/nvdiffrec \
+ && python3.10 -m pip install /tmp/extensions/nvdiffrec --no-build-isolation
+
+RUN mkdir -p /tmp/extensions \
+ && git clone https://github.com/JeffreyXiang/CuMesh.git /tmp/extensions/CuMesh --recursive \
+ && python3.10 -m pip install /tmp/extensions/CuMesh --no-build-isolation
+
+RUN mkdir -p /tmp/extensions \
+ && git clone https://github.com/JeffreyXiang/FlexGEMM.git /tmp/extensions/FlexGEMM --recursive \
+ && python3.10 -m pip install /tmp/extensions/FlexGEMM --no-build-isolation
+
+RUN mkdir -p /tmp/extensions \
+ && cp -r /app/TRELLIS.2/o-voxel /tmp/extensions/o-voxel \
+ && python3.10 -m pip install /tmp/extensions/o-voxel --no-build-isolation
 
 RUN python3.10 -m pip install flash-attn==2.7.3 --no-build-isolation
 
