@@ -55,6 +55,12 @@ RUN git clone -b main https://github.com/microsoft/TRELLIS.2.git --recursive /ap
 
 WORKDIR /app/TRELLIS.2
 
+# Install Gradio from source because Pixal3D's UI uses Gradio Server mode
+# (`from gradio import Server`), which is not exposed by the PyPI wheel that was
+# being installed in earlier image builds.
+RUN python3.10 -m pip install --no-cache-dir --force-reinstall \
+    "git+https://github.com/gradio-app/gradio.git@main"
+
 # TRELLIS.2's setup.sh exits if nvidia-smi is not present. Cloud Docker builders
 # usually have the CUDA toolkit but no attached GPU, so install the same deps directly.
 RUN python3.10 -m pip install \
@@ -66,7 +72,6 @@ RUN python3.10 -m pip install \
     ninja \
     trimesh \
     transformers \
-    gradio==6.0.1 \
     tensorboard \
     pandas \
     lpips \
@@ -116,11 +121,22 @@ RUN python3.10 -m pip install \
     "git+https://github.com/microsoft/MoGe.git" \
     diffusers==0.37.1 \
     accelerate==1.13.0 \
-    gradio==6.0.1 \
     plyfile==1.1.3 \
     spaces \
     requests \
     runpod
+
+# Re-assert source Gradio after Pixal3D deps, because Pixal3D requirements use
+# an unpinned `gradio` dependency and transitive installs can replace it.
+RUN python3.10 -m pip install --no-cache-dir --force-reinstall \
+    "git+https://github.com/gradio-app/gradio.git@main"
+
+RUN python3.10 - <<'PY'
+import gradio
+assert hasattr(gradio, 'Server'), f"Installed gradio lacks Server: {gradio.__version__}"
+print('Gradio version:', gradio.__version__)
+print('Gradio Server import OK')
+PY
 
 RUN python3.10 -m pip install --force-reinstall --no-deps \
     "https://github.com/LDYang694/Storages/releases/download/20260430/utils3d-0.0.2-py3-none-any.whl"
