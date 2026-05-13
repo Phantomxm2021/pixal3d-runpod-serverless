@@ -116,7 +116,7 @@ RUN python3.10 -m pip install \
     "git+https://github.com/microsoft/MoGe.git" \
     diffusers==0.37.1 \
     accelerate==1.13.0 \
-    gradio \
+    gradio==6.0.1 \
     plyfile==1.1.3 \
     spaces \
     requests \
