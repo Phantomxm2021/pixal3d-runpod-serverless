@@ -104,7 +104,9 @@ WORKDIR /app
 RUN git clone -b master https://github.com/TencentARC/Pixal3D.git /app/Pixal3D
 
 WORKDIR /app/Pixal3D
-RUN python3.10 -m pip install -r requirements.txt
+# natten's source build imports torch during metadata generation but does not declare it
+# as an isolated build requirement, so keep the already-installed torch visible.
+RUN python3.10 -m pip install --no-build-isolation -r requirements.txt
 RUN python3.10 -m pip install --force-reinstall --no-deps \
     https://github.com/LDYang694/Storages/releases/download/20260430/utils3d-0.0.2-py3-none-any.whl
 
