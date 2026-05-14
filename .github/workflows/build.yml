@@ -2,6 +2,11 @@ name: Build Pixal3D RunPod Image
 
 on:
   workflow_dispatch:
+    inputs:
+      pixal3d_ref:
+        description: "Pixal3D git ref to bake into the image (branch or commit SHA)"
+        required: false
+        default: "master"
   push:
     branches: [main]
 
@@ -23,7 +28,8 @@ jobs:
 
       - name: Free disk space
         run: |
-          sudo rm -rf /usr/share/dotnet /opt/ghc /usr/local/lib/android /usr/local/share/boost || true
+          sudo rm -rf /usr/share/dotnet /opt/ghc /usr/local/lib/android /usr/local/share/boost /usr/local/share/powershell || true
+          sudo rm -rf /opt/hostedtoolcache/CodeQL /usr/local/.ghcup || true
           docker system prune -af || true
           df -h
 
@@ -46,7 +52,10 @@ jobs:
           context: .
           platforms: linux/amd64
           push: true
+          build-args: |
+            PIXAL3D_REF=${{ github.event.inputs.pixal3d_ref || 'master' }}
           tags: |
             ghcr.io/${{ env.OWNER_LC }}/${{ env.IMAGE_NAME }}:latest
+            ghcr.io/${{ env.OWNER_LC }}/${{ env.IMAGE_NAME }}:sha-${{ github.sha }}
           cache-from: type=gha
           cache-to: type=gha,mode=max
