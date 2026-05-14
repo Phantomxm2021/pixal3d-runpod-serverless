@@ -1,164 +1,168 @@
 # Pixal3D RunPod Serverless Worker
 
-A RunPod **Serverless** worker image for [TencentARC/Pixal3D](https://github.com/TencentARC/Pixal3D) inference. Image is built by GitHub Actions and published to GHCR.
+A RunPod **Serverless** worker image for [TencentARC/Pixal3D](https://github.com/TencentARC/Pixal3D) inference. You send an image, the worker returns a `.glb`. Image is built in GitHub Actions and published to GHCR; nothing is built locally.
 
 ```text
-GitHub Actions  →  ghcr.io/jj-ju/pixal3d-runpod-serverless:latest
-                                            │
-              RunPod Serverless endpoint  ──┘
-                            │
-                            └─ network volume mounted at /runpod-volume
+GitHub Actions  →  ghcr.io/<owner>/pixal3d-runpod-serverless:latest
+                                    │
+              RunPod Serverless endpoint
+                                    │
+                    network volume at /runpod-volume
+                       (Pixal3D + MoGe + DinoV3 + NAF weights)
 ```
 
-This image is **inference only**. Not for training, not for fine-tuning, not for the Gradio UI.
+---
 
-## What the image contains
+## Requirements
 
-- `nvidia/cuda:12.4.1-runtime-ubuntu22.04` base
-- Python 3.10, PyTorch 2.6.0 + cu124
-- Pixal3D's `requirements-hfdemo.txt` (prebuilt wheels for `natten`, `flash_attn_3`, `cumesh`, `flex_gemm`, `o_voxel`, `nvdiffrast`, `nvdiffrec_render`)
-- FlashAttention 2 (`flash-attn==2.7.4.post1`) for Ampere/Ada GPUs
-- Pixal3D's `utils3d-0.0.2` override wheel
-- `ZhengPeng7/BiRefNet` baked into `/opt/hf_baked` (seeded into the volume at first boot)
-- The Pixal3D repo at `/app/Pixal3D`
-- `handler.py` as the CMD
+You must have all of these set up **before** the worker can answer a single job.
 
-## How the handler picks FA2 vs FA3
+### 1. Hugging Face account with access to the gated models
 
-At process start the handler reads `torch.cuda.get_device_capability()`:
-
-| GPU | sm | `ATTN_BACKEND` |
+| Repo | Why | Action |
 |---|---|---|
-| H100 / H200 | 9.0+ | `flash_attn_3` |
-| A100 / A40 / 4090 / L40S | 8.0 / 8.6 / 8.9 | `flash_attn` |
+| [`TencentARC/Pixal3D`](https://huggingface.co/TencentARC/Pixal3D) | Main pipeline weights | Visit the page, click "Agree and access repository" |
+| [`Ruicheng/moge-2-vitl`](https://huggingface.co/Ruicheng/moge-2-vitl) | MoGe-2 camera estimator | Visit, accept terms |
+| [`camenduru/dinov3-vitl16-pretrain-lvd1689m`](https://huggingface.co/camenduru/dinov3-vitl16-pretrain-lvd1689m) | DinoV3 image features (4×) | Usually ungated; accept terms if prompted |
+| [`ZhengPeng7/BiRefNet`](https://huggingface.co/ZhengPeng7/BiRefNet) | Background removal (baked into image) | Usually ungated |
 
-Explicit `ATTN_BACKEND=...` on the endpoint overrides autodetect.
+If your account isn't approved for a gated repo, downloads will 401 even with a valid token.
 
-## One-time setup
+### 2. A Hugging Face **read** token
 
-### 1. Build & push the image
+Generate one at https://huggingface.co/settings/tokens → **New token** → **Read** scope. Store it; you'll paste it into the RunPod endpoint config as `HF_TOKEN`.
 
-GitHub → Actions → **Build Pixal3D RunPod Image** → **Run workflow**. The workflow builds and pushes:
+### 3. A RunPod account
 
-```text
-ghcr.io/jj-ju/pixal3d-runpod-serverless:latest
-ghcr.io/jj-ju/pixal3d-runpod-serverless:sha-<short>
-```
+With:
+- Billing set up so you can run a CPU pod (for ~$0.30 of warming) and a GPU serverless endpoint.
+- Permission to create network volumes and serverless endpoints.
 
-If GHCR is private, make the package public or configure RunPod registry credentials.
+### 4. A GitHub account with this repo
 
-### 2. Accept access for gated HF models
+Forked or cloned. GitHub Actions runs the image build under `${{ github.actor }}` and pushes to `ghcr.io/<your-username>/pixal3d-runpod-serverless`.
 
-Visit each repo and accept terms on your Hugging Face account:
+### 5. (Optional) Public GHCR package or RunPod registry credentials
 
-- https://huggingface.co/TencentARC/Pixal3D
-- https://huggingface.co/Ruicheng/moge-2-vitl
+By default GHCR packages created via the workflow are **private**. RunPod can't pull a private image without credentials. Either:
+- Make the GHCR package public (Package Settings → Change visibility → Public), or
+- Configure registry credentials on the RunPod endpoint (Settings → Container Registry Credentials).
 
-DinoV3 mirror (`camenduru/dinov3-vitl16-pretrain-lvd1689m`) and BiRefNet are typically ungated; verify if downloads 401.
+### 6. A GPU class that the worker supports
 
-### 3. Create a read token
+The image autodetects FA2 vs FA3 at boot:
 
-https://huggingface.co/settings/tokens → New token → Read scope. Keep it handy as `HF_TOKEN`.
+| GPU | Compute capability | Backend chosen |
+|---|---|---|
+| A100 (40GB / 80GB), A40 | 8.0 | `flash_attn` |
+| RTX 4090, L40, L40S | 8.9 | `flash_attn` |
+| H100, H200 | 9.0+ | `flash_attn_3` |
 
-### 4. Create a RunPod network volume
+Pixal3D's reference deployment runs on H100. A100 80GB is the cost-optimal choice on serverless and is recommended.
 
-RunPod → Storage → Network Volume. Size: **60–80 GB**. Pick a region close to your serverless endpoint.
+---
 
-### 5. Warm the volume
+## Instructions
 
-Spin up a cheap CPU pod with the volume mounted at `/runpod-volume`:
+Do these once, in order. Total time: ~30–45 minutes (most of it waiting on the volume warmup).
+
+### Step 1: Build the image
+
+1. Push this repo (or your fork) to GitHub.
+2. Go to **Actions** → **Build Pixal3D RunPod Image** → **Run workflow**. Leave `pixal3d_ref` as `master` unless you want to pin a specific commit.
+3. Wait ~10–15 minutes. The workflow publishes two tags:
+   ```text
+   ghcr.io/<owner>/pixal3d-runpod-serverless:latest
+   ghcr.io/<owner>/pixal3d-runpod-serverless:sha-<short>
+   ```
+4. If you want, make the package public: GitHub → your profile → **Packages** → click the package → **Package settings** → **Change visibility**.
+
+### Step 2: Create the network volume
+
+1. RunPod → **Storage** → **Network Volume** → **+ New Network Volume**.
+2. Size: **60 GB** (80 GB if you want headroom).
+3. Region: pick one with A100 (or your target GPU) availability. **Your serverless endpoint must live in the same region.**
+4. Name it something memorable, e.g. `pixal3d-weights`.
+
+### Step 3: Warm the volume
+
+The volume starts empty. Workers can't download ~15 GB on every cold start, so we pre-fill it once.
+
+1. RunPod → **Pods** → **Deploy** → pick a small CPU instance (e.g. 4 vCPU / 16 GB RAM). GPU not needed.
+2. Attach the network volume from Step 2 at mount path `/runpod-volume`.
+3. Use any image with Python 3.10+ — RunPod's default Ubuntu image is fine. Or use this repo's image; the prefetch script is at `/app/scripts/prefetch_models.py`.
+4. Add environment variable `HF_TOKEN=hf_xxx` (your token from Requirement 2).
+5. Deploy and connect via web terminal.
+6. Run:
+   ```bash
+   # If your pod uses this image:
+   python /app/scripts/prefetch_models.py
+
+   # If your pod uses a generic Python image:
+   pip install huggingface_hub torch
+   curl -O https://raw.githubusercontent.com/<owner>/pixal3d-runpod-serverless/main/scripts/prefetch_models.py
+   export HF_TOKEN=hf_xxx
+   python prefetch_models.py
+   ```
+7. Wait ~10–20 minutes. The script prints each repo as it downloads.
+8. When you see `[prefetch] done. Volume is warm.`, **terminate the pod**. The volume keeps the weights.
+
+You only need to re-run prefetch when Tencent ships a new Pixal3D model version — rare, maybe 2–3× a year.
+
+### Step 4: Create the serverless endpoint
+
+1. RunPod → **Serverless** → **+ New Endpoint**.
+2. Endpoint configuration:
+
+   | Field | Value |
+   |---|---|
+   | Endpoint name | `pixal3d` (or whatever) |
+   | Container image | `ghcr.io/<owner>/pixal3d-runpod-serverless:latest` |
+   | Container disk | 20 GB |
+   | Network volume | the one from Step 2, mount path `/runpod-volume` |
+   | GPU type | A100 80GB (recommended) or H100 80GB |
+   | Max workers | 1 to start (raise after testing) |
+   | Idle timeout | 300 seconds |
+   | Execution timeout | 1800 seconds |
+   | Region | same as the network volume |
+
+3. Environment variables:
+
+   ```text
+   HF_TOKEN=hf_xxx           # required (belt-and-suspenders even with warm volume)
+   PIXAL3D_TIMEOUT=900       # per-job timeout in seconds; optional
+   ```
+
+   Do **not** set `ATTN_BACKEND` — let the handler autodetect it. Only override for debugging (e.g., `sdpa` to bypass flash-attn entirely).
+
+4. Deploy. The endpoint takes a minute to provision.
+
+### Step 5: Send a test job
 
 ```bash
-pip install huggingface_hub torch
-export HF_TOKEN=hf_xxx
-python /app/scripts/prefetch_models.py   # if the pod uses this image
-# or copy scripts/prefetch_models.py from this repo
+curl -X POST "https://api.runpod.ai/v2/<endpoint-id>/runsync" \
+  -H "Authorization: Bearer <your-runpod-api-key>" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "input": {
+      "image_url": "https://example.com/some-object.png",
+      "seed": 42
+    }
+  }'
 ```
 
-Takes ~10–20 minutes. After it finishes, tear the pod down — the volume keeps the weights.
-
-### 6. Create the serverless endpoint
-
-| Setting | Value |
-|---|---|
-| Container Image | `ghcr.io/jj-ju/pixal3d-runpod-serverless:latest` |
-| Container Disk | 20 GB |
-| Network Volume | the one you warmed, mounted at `/runpod-volume` |
-| GPU | A100 80GB (or H100 if you want FA3 + lower latency) |
-| Idle Timeout | 300+ seconds (keeps workers warm) |
-| Max Workers | start at 1, scale up later |
-
-Environment variables on the endpoint:
-
-```text
-HF_TOKEN=hf_xxx            # required for fresh volumes, harmless for warm ones
-PIXAL3D_TIMEOUT=900        # optional, bump if jobs are slow
-ATTN_BACKEND=              # leave unset — handler autodetects
-```
-
-That's everything. Workers boot, autodetect the GPU, set the FA backend, seed BiRefNet from the image, load all models from the volume, and start polling the job queue.
-
-## Request format
-
-### Image URL
-
-```json
-{
-  "input": {
-    "image_url": "https://example.com/input.png",
-    "suffix": ".png",
-    "seed": 42,
-    "skip_rembg": false
-  }
-}
-```
-
-### Base64 image
-
-```json
-{
-  "input": {
-    "image_base64": "iVBORw0KGgo...",
-    "suffix": ".png",
-    "seed": 42
-  }
-}
-```
-
-Data URLs work too: `"data:image/png;base64,iVBORw0KGgo..."`.
-
-`skip_rembg=true` skips BiRefNet background removal — use it if your image already has a clean foreground (transparent PNG or solid background).
-
-## Response format
-
-```json
-{
-  "filename": "output.glb",
-  "mime_type": "model/gltf-binary",
-  "glb_base64": "...",
-  "size_bytes": 123456,
-  "timing": {
-    "fetch_seconds": 0.4,
-    "inference_seconds": 58.2,
-    "encode_seconds": 0.1
-  }
-}
-```
-
-Decode `glb_base64` to write `output.glb` on the client.
-
-## Minimal client example
+Or in Python:
 
 ```python
 import base64, requests
 
-ENDPOINT = "https://api.runpod.ai/v2/YOUR_ENDPOINT_ID/runsync"
-KEY = "YOUR_RUNPOD_API_KEY"
+ENDPOINT = "https://api.runpod.ai/v2/<endpoint-id>/runsync"
+KEY = "<your-runpod-api-key>"
 
 r = requests.post(
     ENDPOINT,
     headers={"Authorization": f"Bearer {KEY}"},
-    json={"input": {"image_url": "https://example.com/input.png"}},
+    json={"input": {"image_url": "https://example.com/object.png"}},
     timeout=1200,
 )
 r.raise_for_status()
@@ -169,35 +173,100 @@ if "error" in out:
 
 with open("output.glb", "wb") as f:
     f.write(base64.b64decode(out["glb_base64"]))
+print("size:", out["size_bytes"], "timing:", out["timing"])
 ```
+
+**The very first request after deploying** is slow (1–3 minutes) — the worker reads weights from the volume, runs FlexGEMM autotune, and JIT-compiles Triton kernels. The autotune and Triton caches are written back to the volume, so subsequent cold starts are fast (~30–60 s) and warm-worker requests are ~30–60 s of pure inference.
+
+---
+
+## API reference
+
+### Request
+
+```json
+{
+  "input": {
+    "image_url":    "https://example.com/input.png",   // OR image_base64
+    "image_base64": "iVBORw0KGgo...",                  // OR data:image/png;base64,...
+    "suffix":       ".png",                            // optional, default ".png"
+    "seed":         42,                                // optional, default 42
+    "skip_rembg":   false                              // optional, skip BiRefNet bg removal
+  }
+}
+```
+
+Set `skip_rembg: true` if your image already has a clean foreground (transparent PNG or solid background). Saves ~1–2 s and removes BiRefNet as a single point of failure for your request.
+
+### Response — success
+
+```json
+{
+  "filename":    "output.glb",
+  "mime_type":   "model/gltf-binary",
+  "glb_base64":  "Z2xURg...",
+  "size_bytes":  4823104,
+  "timing": {
+    "fetch_seconds":     0.4,
+    "inference_seconds": 58.2,
+    "encode_seconds":    0.1
+  }
+}
+```
+
+### Response — error
+
+```json
+{
+  "error": "...",
+  "traceback": "..."
+}
+```
+
+---
 
 ## Troubleshooting
 
-### Worker crashes at startup with `OSError: 401`
+### Worker crashes at startup with `OSError: 401 Client Error`
 
-`HF_TOKEN` isn't set or your account hasn't accepted access to a gated model. Logs will show which repo. Fix on the endpoint env config and on huggingface.co.
+`HF_TOKEN` isn't set, OR your account hasn't accepted access for one of the gated repos. Worker logs name the repo. Fix:
+- Set `HF_TOKEN` on the endpoint env config.
+- Visit each gated repo on HF and accept terms.
+- Redeploy.
 
-### Worker crashes with `flash_attn_3` import error
+### Worker crashes with `flash_attn_3` import or kernel error on A100
 
-You forced `ATTN_BACKEND=flash_attn_3` on an Ampere GPU. Unset it (let autodetect handle it) or set `ATTN_BACKEND=flash_attn`.
+Something forced `ATTN_BACKEND=flash_attn_3` on a non-Hopper GPU. Unset the endpoint env var and let autodetect handle it. FA3 only runs on H100/H200.
 
-### Job runs but returns `Inference finished but produced no GLB.`
+### Worker times out on first request
 
-Usually OOM or a CUDA assertion. Check worker logs. For OOM, try A100 80GB or H100 80GB. Increase `PIXAL3D_TIMEOUT` if hitting timeouts on cold workers.
+First request after a cold volume can take 5+ minutes (FlexGEMM autotune + Triton JIT compile). Set `Execution timeout` on the endpoint to 1800+ seconds and `PIXAL3D_TIMEOUT=1800`. Subsequent requests are fast.
 
-### First request after deploy is very slow
+### Volume runs out of space
 
-Expected when the volume has just been warmed but the first worker on a node still does the initial FlexGEMM autotune + Triton JIT compile. Both cache to the volume; subsequent jobs are fast.
+60 GB should be sufficient. If you hit limits, check the volume's usage from a temporary pod and clear `/runpod-volume/triton` or `/runpod-volume/cache`.
+
+### Job returns `Inference finished but produced no GLB.`
+
+Usually OOM during 1024-resolution texture generation. Move to A100 80GB or H100. Lower-VRAM cards (40 GB) may not be enough at default settings.
 
 ### GitHub Actions build fails on disk space
 
-Less likely with this design (~14–17 GB image), but if it happens move the build to Depot, Docker Build Cloud, or a temporary RunPod pod with a large disk. Same Dockerfile works anywhere.
+Less likely with this design (~14–17 GB image), but if it does:
+- Re-run the workflow once or twice (transient).
+- Or switch to a larger builder: Depot, Docker Build Cloud, or a temporary RunPod CPU pod with a large disk. Same Dockerfile works.
+
+### Build succeeds, `latest` updates, but workers still pull old image
+
+GHCR caches aggressively. Use the `sha-<short>` tag from the workflow instead of `latest` — guaranteed unique per build.
+
+---
 
 ## What lives where
 
-| Thing | Location | Persistent? |
+| Thing | Location | Persists? |
 |---|---|---|
-| Docker image | GHCR, pulled to RunPod nodes | No (re-pulled per node) |
+| Docker image | GHCR, pulled per RunPod node | Per-node cache |
 | Pixal3D source | `/app/Pixal3D` inside image | Per image |
 | Pixal3D / MoGe / DinoV3 weights | `/runpod-volume/huggingface/hub` | Yes |
 | BiRefNet weights | Baked at `/opt/hf_baked/hub`, seeded to volume on first boot | Yes |
@@ -205,3 +274,24 @@ Less likely with this design (~14–17 GB image), but if it happens move the bui
 | FlexGEMM autotune cache | `/runpod-volume/flex_gemm_autotune.json` | Yes |
 | Triton JIT cache | `/runpod-volume/triton` | Yes |
 | `HF_TOKEN` | RunPod endpoint env config | Per endpoint |
+
+---
+
+## Bumping Pixal3D versions
+
+Pixal3D ships occasional model updates. When you want to pick one up:
+
+1. Re-run the workflow with `pixal3d_ref` set to the new commit SHA or branch.
+2. Re-run the prefetch script on a CPU pod against the same volume (it'll only download new/changed snapshots).
+3. Update the endpoint to the new `sha-<short>` tag.
+
+You can keep the old image tag deployed on a separate endpoint while you A/B test.
+
+---
+
+## Limitations
+
+- Inference only. No training or fine-tuning paths.
+- One image config per endpoint. If you want both A100 and H100 endpoints, deploy two endpoints pointing at the same image (or different volumes).
+- Output is base64 inline. GLBs over ~20 MB may exceed RunPod's `runsync` response size limit — use `/run` (async) for large outputs.
+- The `spaces` library used by Pixal3D's `app.py` is bypassed entirely. This image does not serve a Gradio UI.
