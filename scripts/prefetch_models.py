@@ -3,7 +3,10 @@
 import os
 from pathlib import Path
 
-from model_cache import DINO_MODEL_NAME, MOGE_MODEL_NAME, PIXAL3D_MODEL_NAME, configure_cache, pipeline_snapshot
+from model_cache import (
+    DINO_MODEL_NAME, MOGE_MODEL_NAME, NAF_CHECKPOINT, NAF_CHECKPOINT_URL,
+    PIXAL3D_MODEL_NAME, configure_cache, pipeline_snapshot,
+)
 
 
 def main() -> None:
@@ -22,14 +25,11 @@ def main() -> None:
 
     # Loading hubconf.py needs the CUDA-specific natten wheel. A setup Pod only
     # needs to cache the checkpoint under the filename torch.hub will look for.
-    checkpoint = Path(torch.hub.get_dir()) / "checkpoints" / "naf_release.pth"
+    checkpoint = Path(torch.hub.get_dir()) / "checkpoints" / NAF_CHECKPOINT
     if not checkpoint.is_file():
         print("[prefetch] NAF checkpoint", flush=True)
         checkpoint.parent.mkdir(parents=True, exist_ok=True)
-        torch.hub.download_url_to_file(
-            "https://github.com/valeoai/NAF/releases/download/model/naf_release.pth",
-            str(checkpoint),
-        )
+        torch.hub.download_url_to_file(NAF_CHECKPOINT_URL, str(checkpoint))
 
     print("[prefetch] Model weights cached.", flush=True)
 

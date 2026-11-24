@@ -22,6 +22,12 @@ python scripts/prefetch_models.py
 
 The script downloads the Pixal3D single-image checkpoints, MoGe-2, DINOv3, and the NAF checkpoint. The worker uses the BiRefNet model baked into the image for background removal. If you override `PIXAL3D_MODEL_PATH` or `MOGE_MODEL_PATH`, use the same settings on the setup Pod and the endpoint.
 
+### Use a Global Volume
+
+Attach the Global Volume at `/runpod-volume` and set `PIXAL3D_GLOBAL_VOLUME=1`. The worker reads regular model files under `/runpod-volume/pixal3d-models-v1` and keeps its writable Hugging Face, Torch, and Triton caches under `/tmp/pixal3d-cache`.
+
+To populate a new volume, temporarily set `PIXAL3D_PREFILL_ONLY=1` and **Max workers** to `1`. Submit `{"input":{"action":"prefill_models"},"policy":{"executionTimeout":1800000,"ttl":1800000}}` to `/run` and wait for `output.status` to become `ready`. This streams only the files used by the single-image pipeline and publishes a manifest after all files are complete. Remove `PIXAL3D_PREFILL_ONLY` before submitting an inference job. The first inference loads the prefetched weights from the volume.
+
 ### Deploy from a container image
 
 The GitHub Actions workflow publishes `ghcr.io/<owner>/pixal3d-runpod-serverless:latest` and `ghcr.io/<owner>/pixal3d-runpod-serverless:sha-<full-commit-sha>`. It runs on pushes to `main` or via **Run workflow** on the desired branch. Leave `pixal3d_ref` blank to use the pinned Pixal3D source version, or enter an upstream branch or full commit SHA.

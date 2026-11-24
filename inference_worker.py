@@ -10,16 +10,20 @@ import tempfile
 import time
 from pathlib import Path
 
-import torch
-
 from scripts.model_cache import (
     DEFAULT_BIREFNET_MODEL,
     DINO_MODEL_NAME,
+    GLOBAL_MODEL_ROOT,
     MOGE_MODEL_NAME,
+    NAF_CHECKPOINT,
     PIXAL3D_MODEL_NAME,
     configure_cache,
     pipeline_snapshot,
+    use_global_volume,
 )
+
+configure_cache()
+import torch
 
 
 PIXAL_DIR = Path("/app/Pixal3D")
@@ -48,7 +52,6 @@ def _autodetect_attn_backend() -> str:
     return backend
 
 
-configure_cache()
 if not torch.cuda.is_available():
     raise RuntimeError("Pixal3D inference requires a CUDA-enabled GPU.")
 _autodetect_attn_backend()
@@ -63,6 +66,20 @@ from pixal3d.trainers.flow_matching.mixins.image_conditioned_proj import (
     DinoV3ProjFeatureExtractor,
 )
 
+def _prepare_global_models() -> None:
+    from scripts.global_models import verify_global_models
+
+    verify_global_models(GLOBAL_MODEL_ROOT)
+    checkpoint = Path(torch.hub.get_dir()) / "checkpoints" / NAF_CHECKPOINT
+    checkpoint.parent.mkdir(parents=True, exist_ok=True)
+    if not checkpoint.exists():
+        checkpoint.symlink_to(GLOBAL_MODEL_ROOT / NAF_CHECKPOINT)
+
+
+GLOBAL_MODELS = use_global_volume()
+if GLOBAL_MODELS:
+    _prepare_global_models()
+
 
 IMAGE_COND_CONFIGS = {
     "ss":          {"model_name": DINO_MODEL_NAME, "image_size":  512, "grid_resolution": 16},
@@ -74,6 +91,8 @@ IMAGE_COND_CONFIGS = {
 
 def _build_pipeline() -> Pixal3DImageTo3DPipeline:
     model_path = os.environ.get("PIXAL3D_MODEL_PATH", PIXAL3D_MODEL_NAME)
+    if GLOBAL_MODELS:
+        model_path = str(GLOBAL_MODEL_ROOT / "pixal3d")
     _log(f"loading Pixal3D pipeline from {model_path}")
     snapshot, config = pipeline_snapshot(model_path)
     rembg_path = os.environ.get("BIREFNET_MODEL_PATH", DEFAULT_BIREFNET_MODEL)
@@ -114,6 +133,8 @@ def _build_pipeline() -> Pixal3DImageTo3DPipeline:
 
 
 def _build_cond_model(cfg: dict) -> DinoV3ProjFeatureExtractor:
+    if GLOBAL_MODELS:
+        cfg = {**cfg, "model_name": str(GLOBAL_MODEL_ROOT / "dinov3")}
     m = DinoV3ProjFeatureExtractor(**cfg)
     m.eval()
     return m
@@ -121,6 +142,8 @@ def _build_cond_model(cfg: dict) -> DinoV3ProjFeatureExtractor:
 
 def _build_moge() -> "MoGeModel":
     name = os.environ.get("MOGE_MODEL_PATH", MOGE_MODEL_NAME)
+    if GLOBAL_MODELS:
+        name = str(GLOBAL_MODEL_ROOT / "moge/model.pt")
     _log(f"loading MoGe-2 from {name}")
     m = MoGeModel.from_pretrained(name).to("cuda")
     m.eval()

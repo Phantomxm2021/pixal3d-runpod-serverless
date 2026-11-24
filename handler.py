@@ -78,6 +78,17 @@ def handler(job: dict) -> dict:
     if not isinstance(inputs, dict):
         return {"error": "Provide an input object with image_url or image_base64."}
 
+    if os.environ.get("PIXAL3D_PREFILL_ONLY") == "1":
+        if inputs.get("action") != "prefill_models" or os.environ.get("PIXAL3D_GLOBAL_VOLUME") != "1":
+            return {"error": "This worker is in Global Volume prefill mode."}
+        from scripts.global_models import prefill_global_models
+
+        try:
+            return prefill_global_models()
+        except Exception as exc:
+            LOGGER.exception("Global Volume prefill failed")
+            return {"error": f"Global Volume prefill failed: {exc}"}
+
     image_url = inputs.get("image_url")
     image_base64 = inputs.get("image_base64")
     if not image_url and not image_base64:

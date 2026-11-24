@@ -9,16 +9,51 @@ PIXAL3D_MODEL_NAME = "TencentARC/Pixal3D"
 MOGE_MODEL_NAME = "Ruicheng/moge-2-vitl"
 DINO_MODEL_NAME = "camenduru/dinov3-vitl16-pretrain-lvd1689m"
 DEFAULT_BIREFNET_MODEL = "ZhengPeng7/BiRefNet"
+RUNPOD_VOLUME = Path("/runpod-volume")
+GLOBAL_MODEL_ROOT = RUNPOD_VOLUME / "pixal3d-models-v1"
+NAF_CHECKPOINT = "naf_release.pth"
+NAF_CHECKPOINT_URL = f"https://github.com/valeoai/NAF/releases/download/model/{NAF_CHECKPOINT}"
 
 
 def configure_cache() -> None:
-    volume = Path("/runpod-volume")
+    volume = RUNPOD_VOLUME
+    if use_global_volume():
+        # Runpod's Global Volume only holds ordinary, prefetched model files.
+        # Each worker owns its writable caches on the container filesystem.
+        local = Path("/tmp/pixal3d-cache")
+        hf = local / "huggingface"
+        os.environ.update({
+            "HF_HOME": str(hf),
+            "HF_HUB_CACHE": str(hf / "hub"),
+            "HUGGINGFACE_HUB_CACHE": str(hf / "hub"),
+            "HF_XET_CACHE": str(hf / "xet"),
+            "HF_MODULES_CACHE": str(hf / "modules"),
+            "TORCH_HOME": str(local / "torch"),
+            "XDG_CACHE_HOME": str(local),
+            "TRITON_CACHE_DIR": str(local / "triton"),
+            "CUDA_CACHE_PATH": str(local / "cuda"),
+            "FLEX_GEMM_AUTOTUNE_CACHE_PATH": str(local / "flex_gemm_autotune.json"),
+        })
+        local.mkdir(parents=True, exist_ok=True)
+        return
     hf_home = Path(os.environ.setdefault("HF_HOME", str(volume / "huggingface")))
     os.environ.setdefault("HF_HUB_CACHE", os.environ.get("HUGGINGFACE_HUB_CACHE", str(hf_home / "hub")))
     os.environ.setdefault("TORCH_HOME", str(volume / "torch"))
     os.environ.setdefault("XDG_CACHE_HOME", str(volume / "cache"))
     os.environ.setdefault("TRITON_CACHE_DIR", str(volume / "triton"))
     os.environ.setdefault("FLEX_GEMM_AUTOTUNE_CACHE_PATH", str(volume / "flex_gemm_autotune.json"))
+
+
+def use_global_volume() -> bool:
+    return os.environ.get("PIXAL3D_GLOBAL_VOLUME") == "1"
+
+
+def pipeline_checkpoint_files(config: dict) -> list[str]:
+    return [
+        f"{checkpoint}.{extension}"
+        for checkpoint in config["args"]["models"].values()
+        for extension in ("json", "safetensors")
+    ]
 
 
 def pipeline_snapshot(model_path: str) -> tuple[Path, dict]:
@@ -32,11 +67,7 @@ def pipeline_snapshot(model_path: str) -> tuple[Path, dict]:
     config = json.loads(config_path.read_text(encoding="utf-8"))
     # The repository also contains multi-view weights. Download only the files
     # referenced by the single-image pipeline, at the same revision as its config.
-    checkpoint_files = [
-        f"{checkpoint}.{extension}"
-        for checkpoint in config["args"]["models"].values()
-        for extension in ("json", "safetensors")
-    ]
+    checkpoint_files = pipeline_checkpoint_files(config)
     if all((config_path.parent / filename).is_file() for filename in checkpoint_files):
         return config_path.parent, config
     snapshot = snapshot_download(
