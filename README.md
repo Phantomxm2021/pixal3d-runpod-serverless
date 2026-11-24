@@ -44,6 +44,8 @@ The GitHub Actions workflow publishes `ghcr.io/<owner>/pixal3d-runpod-serverless
 
 Select **Docker** in Runpod and enter the image tag. For a private GHCR package, configure container registry credentials. The immutable commit tag makes deployments and rollbacks explicit.
 
+The Docker build compiles NATTEN 0.21.0 against PyTorch 2.6 and CUDA 12.4. It verifies that the wheel contains SM80 kernels for Ampere and Ada GPUs (including A40, RTX 4090, and L40S) and SM90a kernels for Hopper. The compiler is confined to the build stage.
+
 ## Submit a job
 
 Use `/run` for asynchronous jobs. Query `/status/<job-id>` until the job reaches a terminal state. On `COMPLETED`, read the GLB from `output`. For jobs that fit the synchronous wait window, send the same payload to `/runsync`. [Runpod queue API reference](https://docs.runpod.io/serverless/endpoints/operation-reference)

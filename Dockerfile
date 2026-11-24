@@ -1,8 +1,31 @@
 # Pixal3D RunPod Serverless worker.
-# Built on top of Pixal3D's `requirements-hfdemo.txt`, which ships prebuilt
-# cp310 wheels for every native CUDA dep (natten, flash_attn_3, cumesh,
-# flex_gemm, o_voxel, nvdiffrast, nvdiffrec_render) — no source compilation.
+# Use Pixal3D's prebuilt CUDA dependencies except NATTEN, which needs kernels
+# for the GPU architectures this endpoint can schedule.
 # FA2 added separately for non-Hopper GPUs; handler picks FA2/FA3 at startup.
+
+FROM nvidia/cuda:12.4.1-devel-ubuntu22.04 AS natten-build
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        build-essential ca-certificates python3.10 python3-pip python3.10-dev \
+    && rm -rf /var/lib/apt/lists/*
+
+RUN python3.10 -m pip install --no-cache-dir 'cmake==3.31.6' setuptools wheel \
+    && python3.10 -m pip install --no-cache-dir \
+        --index-url https://download.pytorch.org/whl/cu124 'torch==2.6.0+cu124'
+
+# SM80 cubins cover Ampere and Ada. NATTEN compiles its Hopper kernels as SM90a.
+# Pin the source archive and inspect the actual cubins without a GPU.
+ARG NATTEN_N_WORKERS=4
+RUN NATTEN_CUDA_ARCH='8.0;9.0' NATTEN_N_WORKERS="${NATTEN_N_WORKERS}" NATTEN_IS_BUILDING_DIST=1 \
+    python3.10 -m pip wheel --no-cache-dir --no-deps --no-build-isolation --wheel-dir /wheels \
+        'https://files.pythonhosted.org/packages/46/c9/aa6bd171aa23de07f401131ce2aff0d1cfa036e22ad8e7e8faa9d66b8067/natten-0.21.0.tar.gz#sha256=810aaf179e1a6fdb0a9279d7858d00412a0d3f045e546cada415205215ccd539' \
+    && python3.10 -m zipfile -e /wheels/natten-*.whl /tmp/natten-check \
+    && cuobjdump --list-elf /tmp/natten-check/natten/libnatten*.so > /tmp/natten-cubins.txt \
+    && grep -oE 'sm_[0-9]+a?' /tmp/natten-cubins.txt | sort -u > /tmp/natten-archs.txt \
+    && cat /tmp/natten-archs.txt \
+    && grep -qx sm_80 /tmp/natten-archs.txt \
+    && grep -qx sm_90a /tmp/natten-archs.txt \
+    && rm -rf /tmp/natten-check /tmp/natten-cubins.txt /tmp/natten-archs.txt
 
 FROM nvidia/cuda:12.4.1-runtime-ubuntu22.04
 
@@ -49,10 +72,12 @@ COPY requirements.txt /app/requirements.txt
 # MoGe 3 introduces a source-built FlexGEMM dependency and requires a newer
 # trimesh. The worker uses the MoGe 2 camera estimator.
 ARG MOGE_REF=9642cf99a13fd829a4f7934fd8dab17e7091da9d
-RUN sed -E '/^git\+https:\/\/github\.com\/microsoft\/MoGe\.git/d; /^gradio$/d' \
+RUN --mount=type=bind,from=natten-build,source=/wheels,target=/tmp/natten-wheels \
+    sed -E '/^git\+https:\/\/github\.com\/microsoft\/MoGe\.git/d; /^gradio$/d; /^natten([=<>!~ @]|$)/d; /\/natten-[^/]*\.whl([?#].*)?$/d' \
         requirements-hfdemo.txt > /tmp/worker-requirements.txt \
     && python3.10 -m pip install -r /tmp/worker-requirements.txt -r /app/requirements.txt \
         'torch==2.6.0+cu124' 'torchvision==0.21.0+cu124' \
+        /tmp/natten-wheels/natten-*.whl \
         "moge @ git+https://github.com/microsoft/MoGe.git@${MOGE_REF}" \
     && rm /tmp/worker-requirements.txt
 
@@ -88,7 +113,8 @@ RUN git -C /app/Pixal3D apply /tmp/pixal3d-shared-dinov3.patch \
         from transformers import DINOv3ViTModel; \
         missing = [name for name in ('o_voxel', 'flex_gemm', 'pixal3d') if find_spec(name) is None]; \
         assert not missing, f'Missing worker modules: {missing}'; \
-        assert torch.version.cuda == '12.4', f'Unexpected PyTorch CUDA version: {torch.version.cuda}'" \
+        assert torch.version.cuda == '12.4', f'Unexpected PyTorch CUDA version: {torch.version.cuda}'; \
+        assert natten.HAS_LIBNATTEN, 'NATTEN native CUDA extension could not load'" \
     && python3.10 -c "from handler import handler; assert 'error' in handler({'input': {}})"
 
 CMD ["python3", "-u", "-m", "scripts.worker_diagnostics"]
