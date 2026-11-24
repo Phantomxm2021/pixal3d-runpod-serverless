@@ -1,0 +1,18 @@
+diff --git a/pixal3d/trainers/flow_matching/mixins/image_conditioned_proj.py b/pixal3d/trainers/flow_matching/mixins/image_conditioned_proj.py
+--- a/pixal3d/trainers/flow_matching/mixins/image_conditioned_proj.py
++++ b/pixal3d/trainers/flow_matching/mixins/image_conditioned_proj.py
+@@ -463,6 +463,8 @@ class DinoV3ProjFeatureExtractor(nn.Module):
+         image_size: int = 512,
+         grid_resolution: int = 16,
+         use_naf_upsample: bool = False,
+         naf_target_size: Optional[List[int]] = None,
++        *,
++        dino_model: Optional[DINOv3ViTModel] = None,
+     ):
+         super().__init__()
+@@ -480,4 +482,4 @@ class DinoV3ProjFeatureExtractor(nn.Module):
+         # Load DINOv3 model (frozen, no trainable params in this module)
+-        self.model = DINOv3ViTModel.from_pretrained(model_name)
++        self.model = DINOv3ViTModel.from_pretrained(model_name) if dino_model is None else dino_model
+         self.model.eval()
+         self.model.requires_grad_(False)

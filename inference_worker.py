@@ -91,10 +91,10 @@ if GLOBAL_MODELS:
 
 
 IMAGE_COND_CONFIGS = {
-    "ss":          {"model_name": DINO_MODEL_NAME, "image_size":  512, "grid_resolution": 16},
-    "shape_512":   {"model_name": DINO_MODEL_NAME, "image_size":  512, "grid_resolution": 32, "use_naf_upsample": True, "naf_target_size":  512},
-    "shape_1024":  {"model_name": DINO_MODEL_NAME, "image_size": 1024, "grid_resolution": 64, "use_naf_upsample": True, "naf_target_size":  512},
-    "tex_1024":    {"model_name": DINO_MODEL_NAME, "image_size": 1024, "grid_resolution": 64, "use_naf_upsample": True, "naf_target_size": 1024},
+    "ss":          {"image_size":  512, "grid_resolution": 16},
+    "shape_512":   {"image_size":  512, "grid_resolution": 32, "use_naf_upsample": True, "naf_target_size":  512},
+    "shape_1024":  {"image_size": 1024, "grid_resolution": 64, "use_naf_upsample": True, "naf_target_size":  512},
+    "tex_1024":    {"image_size": 1024, "grid_resolution": 64, "use_naf_upsample": True, "naf_target_size": 1024},
 }
 
 
@@ -125,41 +125,74 @@ def _load_pixal3d_pipeline() -> Pixal3DImageTo3DPipeline:
 
 
 def _prepare_pipeline(pipeline: Pixal3DImageTo3DPipeline) -> None:
-    _log("building DinoV3 cond models")
-    pipeline.image_cond_model_ss          = _build_cond_model(IMAGE_COND_CONFIGS["ss"])
-    pipeline.image_cond_model_shape_512   = _build_cond_model(IMAGE_COND_CONFIGS["shape_512"])
-    pipeline.image_cond_model_shape_1024  = _build_cond_model(IMAGE_COND_CONFIGS["shape_1024"])
-    pipeline.image_cond_model_tex_1024    = _build_cond_model(IMAGE_COND_CONFIGS["tex_1024"])
+    dino_path = str(GLOBAL_MODEL_ROOT / "dinov3") if GLOBAL_MODELS else DINO_MODEL_NAME
+    _log(f"Loading shared DINOv3 from {dino_path}")
+    started = time.monotonic()
+    dino_model = None
+    cond_models = []
+    for stage, config in IMAGE_COND_CONFIGS.items():
+        cond_model = DinoV3ProjFeatureExtractor(dino_path, dino_model=dino_model, **config)
+        cond_model.eval()
+        dino_model = cond_model.model
+        cond_models.append(cond_model)
+        setattr(pipeline, f"image_cond_model_{stage}", cond_model)
+    _log(f"Shared DINOv3 and {len(cond_models)} projection modules ready in {time.monotonic() - started:.2f}s")
 
     pipeline.low_vram = False
     pipeline.cuda()
-    for attr in ("image_cond_model_ss", "image_cond_model_shape_512",
-                 "image_cond_model_shape_1024", "image_cond_model_tex_1024"):
-        getattr(pipeline, attr).cuda()
+    for cond_model in cond_models:
+        cond_model.cuda()
 
-    _log("forcing NAF download for cond models that need it")
-    for attr in ("image_cond_model_ss", "image_cond_model_shape_512",
-                 "image_cond_model_shape_1024", "image_cond_model_tex_1024"):
-        m = getattr(pipeline, attr)
-        if getattr(m, "use_naf_upsample", False):
-            m._load_naf()
-
-def _build_cond_model(cfg: dict) -> DinoV3ProjFeatureExtractor:
-    if GLOBAL_MODELS:
-        cfg = {**cfg, "model_name": str(GLOBAL_MODEL_ROOT / "dinov3")}
-    m = DinoV3ProjFeatureExtractor(**cfg)
-    m.eval()
-    return m
+    naf_users = [cond_model for cond_model in cond_models if cond_model.use_naf_upsample]
+    if naf_users:
+        _log("Loading shared NAF for image conditioning")
+        started = time.monotonic()
+        first_user, *other_users = naf_users
+        first_user._load_naf()
+        for cond_model in other_users:
+            cond_model.naf_model = first_user.naf_model
+        _log(f"Shared NAF ready for {len(naf_users)} projection modules in {time.monotonic() - started:.2f}s")
 
 
-def _build_moge() -> "MoGeModel":
+def _build_moge() -> tuple[MoGeModel, dict[str, float]]:
     name = os.environ.get("MOGE_MODEL_PATH", MOGE_MODEL_NAME)
     if GLOBAL_MODELS:
         name = str(GLOBAL_MODEL_ROOT / "moge/model.pt")
-    _log(f"loading MoGe-2 from {name}")
-    m = MoGeModel.from_pretrained(name).to("cuda")
+    path = Path(name)
+    if not GLOBAL_MODELS and not path.is_file():
+        from huggingface_hub import hf_hub_download
+
+        _log(f"Resolving MoGe-2 checkpoint for {name}")
+        path = Path(hf_hub_download(repo_id=name, repo_type="model", filename="model.pt"))
+
+    _log(f"Reading MoGe-2 checkpoint on CPU from {path}")
+    started = time.monotonic()
+    checkpoint = torch.load(path, map_location="cpu", weights_only=True)
+    read_seconds = round(time.monotonic() - started, 2)
+    _log(f"MoGe-2 checkpoint read complete in {read_seconds:.2f}s")
+
+    # Match the pinned MoGeModel.from_pretrained constructor and state-dict options.
+    _log("Initializing MoGe-2 on CPU")
+    started = time.monotonic()
+    m = MoGeModel(**checkpoint["model_config"])
+    m.load_state_dict(checkpoint["model"], strict=False)
+    del checkpoint
+    cpu_init_seconds = round(time.monotonic() - started, 2)
+    _log(f"MoGe-2 CPU initialization complete in {cpu_init_seconds:.2f}s")
+
+    torch.cuda.synchronize()
+    _log("Transferring MoGe-2 to CUDA")
+    started = time.monotonic()
+    m = m.to("cuda")
+    torch.cuda.synchronize()
+    cuda_seconds = round(time.monotonic() - started, 2)
+    _log(f"MoGe-2 CUDA transfer complete in {cuda_seconds:.2f}s")
     m.eval()
-    return m
+    return m, {
+        "moge_checkpoint_read_seconds": read_seconds,
+        "moge_cpu_init_seconds": cpu_init_seconds,
+        "moge_cuda_transfer_seconds": cuda_seconds,
+    }
 
 
 _load_start = time.monotonic()
@@ -168,13 +201,14 @@ try:
     _pipeline_load_seconds = time.monotonic() - _load_start
     _log(f"Pixal3D pipeline load complete in {_pipeline_load_seconds:.2f}s")
     _prepare_pipeline(PIPELINE)
-    MOGE_MODEL = _build_moge()
+    MOGE_MODEL, _moge_timings = _build_moge()
 except Exception:
     _log(f"Model load failed after {time.monotonic() - _load_start:.2f}s")
     raise
 MODEL_LOAD_TIMINGS = {
     "pixal3d_pipeline_load_seconds": round(_pipeline_load_seconds, 2),
     "model_load_seconds": round(time.monotonic() - _load_start, 2),
+    **_moge_timings,
 }
 _log(f"Model load complete in {MODEL_LOAD_TIMINGS['model_load_seconds']:.2f}s")
 

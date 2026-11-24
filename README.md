@@ -34,6 +34,8 @@ Set the endpoint's **Model** to `TencentARC/Pixal3D` and add `PIXAL3D_RUNPOD_MOD
 
 Compare the job's `delayTime` in milliseconds with `output.timing.model_load_seconds` on the first job that loads the models. The load time includes the Pixal3D pipeline, auxiliary models, and transfer to the GPU. `pixal3d_pipeline_load_seconds` measures the initial pipeline load before that transfer.
 
+The conditioning stages share one DINOv3 instance and one NAF instance. The cold job also reports `moge_checkpoint_read_seconds`, `moge_cpu_init_seconds`, and `moge_cuda_transfer_seconds` for MoGe-2.
+
 ### Deploy from a container image
 
 The GitHub Actions workflow publishes `ghcr.io/<owner>/pixal3d-runpod-serverless:latest` and `ghcr.io/<owner>/pixal3d-runpod-serverless:sha-<full-commit-sha>`. It runs on pushes to `main` or via **Run workflow** on the desired branch. Leave `pixal3d_ref` blank to use the pinned Pixal3D source version, or enter an upstream branch or full commit SHA.

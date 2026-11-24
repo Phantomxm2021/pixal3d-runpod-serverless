@@ -74,11 +74,14 @@ WORKDIR /app
 
 COPY rp_handler.py handler.py inference_worker.py /app/
 COPY scripts /app/scripts
+COPY patches/pixal3d-shared-dinov3.patch /tmp/pixal3d-shared-dinov3.patch
 
 # Runpod's image builder has no GPU. Importing o_voxel or the Pixal3D
 # pipeline initializes FlexGEMM's Triton driver during import. Check that
 # those modules are present here and load them on the GPU worker at startup.
-RUN python3.10 -m pip check \
+RUN git -C /app/Pixal3D apply /tmp/pixal3d-shared-dinov3.patch \
+    && rm /tmp/pixal3d-shared-dinov3.patch \
+    && python3.10 -m pip check \
     && PYTHONPATH=/app/Pixal3D python3.10 -c "from importlib.util import find_spec; \
         import torch, runpod, boto3, flash_attn, flash_attn_interface, natten; \
         from moge.model.v2 import MoGeModel; \
