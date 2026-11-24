@@ -22,24 +22,26 @@ DINO_FILES = ("config.json", "model.safetensors", "preprocessor_config.json")
 MANIFEST = "manifest.json"
 
 
-def verify_global_models(root: Path) -> dict[str, int]:
+def verify_global_models(root: Path, *, include_pipeline: bool = True) -> dict[str, int]:
     try:
         sizes = json.loads((root / MANIFEST).read_text(encoding="utf-8"))
-        pipeline = json.loads((root / "pixal3d/pipeline.json").read_text(encoding="utf-8"))
-        expected = {
-            "pixal3d/pipeline.json",
-            "moge/model.pt",
-            NAF_CHECKPOINT,
-            *(f"pixal3d/{name}" for name in pipeline_checkpoint_files(pipeline)),
-            *(f"dinov3/{name}" for name in DINO_FILES),
-        }
-        if not isinstance(sizes, dict) or set(sizes) != expected:
+        expected = {"moge/model.pt", NAF_CHECKPOINT, *(f"dinov3/{name}" for name in DINO_FILES)}
+        if not isinstance(sizes, dict):
+            raise ValueError("Model manifest must be an object.")
+        if include_pipeline:
+            pipeline = json.loads((root / "pixal3d/pipeline.json").read_text(encoding="utf-8"))
+            expected.add("pixal3d/pipeline.json")
+            expected.update(f"pixal3d/{name}" for name in pipeline_checkpoint_files(pipeline))
+        if include_pipeline and set(sizes) != expected:
             raise ValueError("Model manifest lists an unexpected set of files.")
-        for name, size in sizes.items():
+        verified = {}
+        for name in sorted(expected):
+            size = sizes.get(name)
             path = root / name
             if type(size) is not int or size <= 0 or not path.is_file() or path.stat().st_size != size:
                 raise ValueError(f"Model file is missing or incomplete: {name}")
-        return sizes
+            verified[name] = size
+        return verified
     except (OSError, TypeError, ValueError, KeyError) as exc:
         raise RuntimeError(f"Global Volume model files are incomplete. Run prefill_models first: {exc}") from exc
 

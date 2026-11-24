@@ -66,6 +66,9 @@ class GlobalModelTests(unittest.TestCase):
             sizes = {name: len(content) for name, content in files.items()}
             (root / "manifest.json").write_text(json.dumps(sizes))
             self.assertEqual(verify_global_models(root), sizes)
+            (root / "pixal3d/pipeline.json").unlink()
+            aux_sizes = {name: size for name, size in sizes.items() if not name.startswith("pixal3d/")}
+            self.assertEqual(verify_global_models(root, include_pipeline=False), aux_sizes)
             (root / "moge/model.pt").write_text("short")
             with self.assertRaisesRegex(RuntimeError, "moge/model.pt"):
-                verify_global_models(root)
+                verify_global_models(root, include_pipeline=False)

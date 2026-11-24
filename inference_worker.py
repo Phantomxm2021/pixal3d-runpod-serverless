@@ -19,7 +19,9 @@ from scripts.model_cache import (
     PIXAL3D_MODEL_NAME,
     configure_cache,
     pipeline_snapshot,
+    runpod_pipeline_snapshot,
     use_global_volume,
+    use_runpod_model_cache,
 )
 
 PIXAL_DIR = Path("/app/Pixal3D")
@@ -69,10 +71,11 @@ from pixal3d.trainers.flow_matching.mixins.image_conditioned_proj import (
     DinoV3ProjFeatureExtractor,
 )
 
+
 def _prepare_global_models() -> None:
     from scripts.global_models import verify_global_models
 
-    verify_global_models(GLOBAL_MODEL_ROOT)
+    verify_global_models(GLOBAL_MODEL_ROOT, include_pipeline=not RUNPOD_MODEL_CACHE)
     checkpoint = Path(torch.hub.get_dir()) / "checkpoints" / NAF_CHECKPOINT
     checkpoint.parent.mkdir(parents=True, exist_ok=True)
     if not checkpoint.exists():
@@ -80,6 +83,7 @@ def _prepare_global_models() -> None:
 
 
 GLOBAL_MODELS = use_global_volume()
+RUNPOD_MODEL_CACHE = use_runpod_model_cache()
 if GLOBAL_MODELS:
     _log("Verifying prefetched Global Volume model files")
     _prepare_global_models()
@@ -94,12 +98,16 @@ IMAGE_COND_CONFIGS = {
 }
 
 
-def _build_pipeline() -> Pixal3DImageTo3DPipeline:
-    model_path = os.environ.get("PIXAL3D_MODEL_PATH", PIXAL3D_MODEL_NAME)
-    if GLOBAL_MODELS:
-        model_path = str(GLOBAL_MODEL_ROOT / "pixal3d")
-    _log(f"loading Pixal3D pipeline from {model_path}")
-    snapshot, config = pipeline_snapshot(model_path)
+def _load_pixal3d_pipeline() -> Pixal3DImageTo3DPipeline:
+    if RUNPOD_MODEL_CACHE:
+        _log("Resolving Pixal3D weights in the Runpod node cache")
+        snapshot, config = runpod_pipeline_snapshot()
+    else:
+        model_path = os.environ.get("PIXAL3D_MODEL_PATH", PIXAL3D_MODEL_NAME)
+        if GLOBAL_MODELS:
+            model_path = str(GLOBAL_MODEL_ROOT / "pixal3d")
+        snapshot, config = pipeline_snapshot(model_path)
+    _log(f"Loading Pixal3D pipeline from {snapshot}")
     rembg_path = os.environ.get("BIREFNET_MODEL_PATH", DEFAULT_BIREFNET_MODEL)
     baked_path = Path("/opt/birefnet")
     if rembg_path == DEFAULT_BIREFNET_MODEL and (baked_path / "config.json").is_file():
@@ -113,8 +121,10 @@ def _build_pipeline() -> Pixal3DImageTo3DPipeline:
             if entry.name != "pipeline.json":
                 (pipeline_dir / entry.name).symlink_to(entry, target_is_directory=entry.is_dir())
         (pipeline_dir / "pipeline.json").write_text(json.dumps(config), encoding="utf-8")
-        pipeline = Pixal3DImageTo3DPipeline.from_pretrained(str(pipeline_dir))
+        return Pixal3DImageTo3DPipeline.from_pretrained(str(pipeline_dir))
 
+
+def _prepare_pipeline(pipeline: Pixal3DImageTo3DPipeline) -> None:
     _log("building DinoV3 cond models")
     pipeline.image_cond_model_ss          = _build_cond_model(IMAGE_COND_CONFIGS["ss"])
     pipeline.image_cond_model_shape_512   = _build_cond_model(IMAGE_COND_CONFIGS["shape_512"])
@@ -133,9 +143,6 @@ def _build_pipeline() -> Pixal3DImageTo3DPipeline:
         m = getattr(pipeline, attr)
         if getattr(m, "use_naf_upsample", False):
             m._load_naf()
-
-    return pipeline
-
 
 def _build_cond_model(cfg: dict) -> DinoV3ProjFeatureExtractor:
     if GLOBAL_MODELS:
@@ -156,9 +163,20 @@ def _build_moge() -> "MoGeModel":
 
 
 _load_start = time.monotonic()
-PIPELINE = _build_pipeline()
-MOGE_MODEL = _build_moge()
-_log(f"model load complete in {time.monotonic() - _load_start:.1f}s")
+try:
+    PIPELINE = _load_pixal3d_pipeline()
+    _pipeline_load_seconds = time.monotonic() - _load_start
+    _log(f"Pixal3D pipeline load complete in {_pipeline_load_seconds:.2f}s")
+    _prepare_pipeline(PIPELINE)
+    MOGE_MODEL = _build_moge()
+except Exception:
+    _log(f"Model load failed after {time.monotonic() - _load_start:.2f}s")
+    raise
+MODEL_LOAD_TIMINGS = {
+    "pixal3d_pipeline_load_seconds": round(_pipeline_load_seconds, 2),
+    "model_load_seconds": round(time.monotonic() - _load_start, 2),
+}
+_log(f"Model load complete in {MODEL_LOAD_TIMINGS['model_load_seconds']:.2f}s")
 
 
 # ---------------------------------------------------------------------------

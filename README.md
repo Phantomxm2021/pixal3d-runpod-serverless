@@ -28,6 +28,12 @@ Attach the Global Volume at `/runpod-volume` and set `PIXAL3D_GLOBAL_VOLUME=1`. 
 
 To populate a new volume, temporarily set `PIXAL3D_PREFILL_ONLY=1` and **Max workers** to `1`. Submit `{"input":{"action":"prefill_models"},"policy":{"executionTimeout":1800000,"ttl":1800000}}` to `/run` and wait for `output.status` to become `ready`. This streams only the files used by the single-image pipeline and publishes a manifest after all files are complete. Remove `PIXAL3D_PREFILL_ONLY` before submitting an inference job. The first inference loads the prefetched weights from the volume.
 
+### Load Pixal3D from the Runpod node cache
+
+Set the endpoint's **Model** to `TencentARC/Pixal3D` and add `PIXAL3D_RUNPOD_MODEL_CACHE=1`. The worker loads the single-image Pixal3D checkpoints from Runpod's cached Hugging Face snapshot under `/runpod-volume/huggingface-cache/hub` and fails if the required files are missing. Keep `PIXAL3D_GLOBAL_VOLUME=1` with the prefetched volume attached for MoGe-2, DINOv3, and NAF. BiRefNet loads from the container image. [Runpod cached models](https://docs.runpod.io/serverless/endpoints/model-caching)
+
+Compare the job's `delayTime` in milliseconds with `output.timing.model_load_seconds` on the first job that loads the models. The load time includes the Pixal3D pipeline, auxiliary models, and transfer to the GPU. `pixal3d_pipeline_load_seconds` measures the initial pipeline load before that transfer.
+
 ### Deploy from a container image
 
 The GitHub Actions workflow publishes `ghcr.io/<owner>/pixal3d-runpod-serverless:latest` and `ghcr.io/<owner>/pixal3d-runpod-serverless:sha-<full-commit-sha>`. It runs on pushes to `main` or via **Run workflow** on the desired branch. Leave `pixal3d_ref` blank to use the pinned Pixal3D source version, or enter an upstream branch or full commit SHA.

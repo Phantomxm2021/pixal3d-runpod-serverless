@@ -2,6 +2,7 @@
 
 import json
 import os
+import re
 from pathlib import Path
 
 
@@ -11,15 +12,15 @@ DINO_MODEL_NAME = "camenduru/dinov3-vitl16-pretrain-lvd1689m"
 DEFAULT_BIREFNET_MODEL = "ZhengPeng7/BiRefNet"
 RUNPOD_VOLUME = Path("/runpod-volume")
 GLOBAL_MODEL_ROOT = RUNPOD_VOLUME / "pixal3d-models-v1"
+RUNPOD_MODEL_HUB = RUNPOD_VOLUME / "huggingface-cache" / "hub"
 NAF_CHECKPOINT = "naf_release.pth"
 NAF_CHECKPOINT_URL = f"https://github.com/valeoai/NAF/releases/download/model/{NAF_CHECKPOINT}"
 
 
 def configure_cache() -> None:
     volume = RUNPOD_VOLUME
-    if use_global_volume():
-        # Runpod's Global Volume only holds ordinary, prefetched model files.
-        # Each worker owns its writable caches on the container filesystem.
+    if use_global_volume() or use_runpod_model_cache():
+        # Keep writable caches on the container filesystem when using prefetched models.
         local = Path("/tmp/pixal3d-cache")
         hf = local / "huggingface"
         os.environ.update({
@@ -48,12 +49,41 @@ def use_global_volume() -> bool:
     return os.environ.get("PIXAL3D_GLOBAL_VOLUME") == "1"
 
 
+def use_runpod_model_cache() -> bool:
+    return os.environ.get("PIXAL3D_RUNPOD_MODEL_CACHE") == "1"
+
+
 def pipeline_checkpoint_files(config: dict) -> list[str]:
     return [
         f"{checkpoint}.{extension}"
         for checkpoint in config["args"]["models"].values()
         for extension in ("json", "safetensors")
     ]
+
+
+def runpod_pipeline_snapshot() -> tuple[Path, dict]:
+    repo = RUNPOD_MODEL_HUB / f"models--{PIXAL3D_MODEL_NAME.replace('/', '--')}"
+    snapshots = repo / "snapshots"
+    try:
+        try:
+            revision = (repo / "refs/main").read_text(encoding="utf-8").strip()
+        except FileNotFoundError:
+            revisions = [path.name for path in snapshots.iterdir() if path.is_dir()]
+            if len(revisions) != 1:
+                raise ValueError("Expected one snapshot when refs/main is unavailable.")
+            revision, = revisions
+        if not re.fullmatch(r"[a-f0-9]{40}", revision):
+            raise ValueError(f"Invalid snapshot revision: {revision!r}")
+
+        snapshot = snapshots / revision
+        config = json.loads((snapshot / "pipeline.json").read_text(encoding="utf-8"))
+        for filename in pipeline_checkpoint_files(config):
+            path = snapshot / filename
+            if not path.is_file() or path.stat().st_size == 0:
+                raise ValueError(f"Model checkpoint is missing or empty: {filename}")
+        return snapshot, config
+    except (OSError, ValueError, TypeError, KeyError, AttributeError) as exc:
+        raise RuntimeError(f"Runpod node model cache is missing or incomplete at {repo}: {exc}") from exc
 
 
 def pipeline_snapshot(model_path: str) -> tuple[Path, dict]:

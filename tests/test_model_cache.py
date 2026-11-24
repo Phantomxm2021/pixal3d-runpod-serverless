@@ -6,10 +6,39 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import Mock, patch
 
-from scripts.model_cache import pipeline_snapshot
+from scripts.model_cache import pipeline_snapshot, runpod_pipeline_snapshot
 
 
 class PipelineSnapshotTests(unittest.TestCase):
+    def test_runpod_snapshot_uses_refs_and_requires_checkpoint_blobs(self):
+        with tempfile.TemporaryDirectory() as directory:
+            hub = Path(directory)
+            repo = hub / "models--TencentARC--Pixal3D"
+            revision = "a" * 40
+            snapshot = repo / "snapshots" / revision
+            (snapshot / "ckpts").mkdir(parents=True)
+            (repo / "refs").mkdir()
+            (repo / "refs/main").write_text(revision + "\n", encoding="utf-8")
+            config = {"args": {"models": {"decoder": "ckpts/decoder"}}}
+            (snapshot / "pipeline.json").write_text(json.dumps(config), encoding="utf-8")
+            (snapshot / "ckpts/decoder.json").write_text("{}", encoding="utf-8")
+            blob = repo / "blobs/weights"
+            blob.parent.mkdir()
+            blob.write_bytes(b"weights")
+            (snapshot / "ckpts/decoder.safetensors").symlink_to(blob)
+            other = repo / "snapshots" / ("b" * 40)
+            other.mkdir()
+            with patch("scripts.model_cache.RUNPOD_MODEL_HUB", hub):
+                self.assertEqual(runpod_pipeline_snapshot(), (snapshot, config))
+                (repo / "refs/main").unlink()
+                with self.assertRaisesRegex(RuntimeError, "Expected one snapshot"):
+                    runpod_pipeline_snapshot()
+                other.rmdir()
+                self.assertEqual(runpod_pipeline_snapshot(), (snapshot, config))
+                blob.unlink()
+                with self.assertRaisesRegex(RuntimeError, "decoder.safetensors"):
+                    runpod_pipeline_snapshot()
+
     def test_only_downloads_configured_single_image_checkpoints(self):
         with tempfile.TemporaryDirectory() as directory:
             snapshot = Path(directory) / "commit"

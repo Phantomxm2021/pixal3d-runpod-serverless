@@ -7,6 +7,7 @@ import binascii
 import logging
 import os
 import re
+import sys
 import tempfile
 import time
 import uuid
@@ -68,10 +69,12 @@ def _upload_glb(path: Path, bucket: str) -> str:
 
 def _run_inference(input_path: Path, output_path: Path, *, seed: int, skip_rembg: bool) -> dict:
     print("[request] Importing inference worker", flush=True)
-    from inference_worker import run_inference
+    cold = "inference_worker" not in sys.modules
+    from inference_worker import MODEL_LOAD_TIMINGS, run_inference
 
     print("[request] Inference worker ready, starting inference", flush=True)
-    return run_inference(input_path, output_path, seed=seed, skip_rembg=skip_rembg)
+    timing = run_inference(input_path, output_path, seed=seed, skip_rembg=skip_rembg)
+    return {**MODEL_LOAD_TIMINGS, **timing} if cold else timing
 
 
 def handler(job: dict) -> dict:
