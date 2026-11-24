@@ -9,7 +9,7 @@ A queue-based Runpod Serverless worker for [TencentARC/Pixal3D](https://github.c
 3. Start with one **A100 80 GB** or **H100 80 GB** worker and an **1800-second execution timeout**. Leave the Docker command at its default. Set `HF_TOKEN` as an endpoint secret if Hugging Face requires access to any selected model. Monitor progress in the endpoint's **Builds** tab.
 4. Attach a network volume in the same data center to reuse downloaded weights between workers. Serverless mounts it at `/runpod-volume`. The worker can populate an empty volume when it first starts, or you can warm the volume before deployment using the commands below.
 
-If Runpod reports `runpod.serverless.start() handler not found in your repo`, confirm the GitHub branch contains `rp_handler.py` at its root and that **Dockerfile Path** points to `Dockerfile`. Existing GitHub-backed endpoints use GitHub Releases to trigger updates. For the initial deployment, select the fixed branch in the import dialog. [Runpod GitHub deployment documentation](https://docs.runpod.io/serverless/workers/github-integration)
+Runpod can display `runpod.serverless.start() handler not found in your repo` when importing from a branch other than `main`. If Runpod shows the expected commit, finds the root `Dockerfile`, and the selected branch contains `rp_handler.py`, click **Next → Continue anyway** to reach endpoint configuration. Existing GitHub-backed endpoints use GitHub Releases to trigger updates. [Runpod GitHub deployment documentation](https://docs.runpod.io/serverless/workers/github-integration)
 
 ### Warm the network volume
 
