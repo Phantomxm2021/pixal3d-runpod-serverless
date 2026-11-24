@@ -67,8 +67,10 @@ def _upload_glb(path: Path, bucket: str) -> str:
 
 
 def _run_inference(input_path: Path, output_path: Path, *, seed: int, skip_rembg: bool) -> dict:
+    print("[request] Importing inference worker", flush=True)
     from inference_worker import run_inference
 
+    print("[request] Inference worker ready, starting inference", flush=True)
     return run_inference(input_path, output_path, seed=seed, skip_rembg=skip_rembg)
 
 
@@ -131,6 +133,7 @@ def handler(job: dict) -> dict:
         input_path = directory / f"input.{suffix.lstrip('.')}"
         output_path = directory / "output.glb"
         started = time.monotonic()
+        print("[request] Reading input image", flush=True)
         try:
             if image_url:
                 _download_image(image_url, input_path)
@@ -139,6 +142,7 @@ def handler(job: dict) -> dict:
         except ValueError as exc:
             return {"error": str(exc)}
         fetch_seconds = round(time.monotonic() - started, 2)
+        print(f"[request] Input image ready after {fetch_seconds:.2f}s", flush=True)
 
         try:
             timing = _run_inference(input_path, output_path, seed=seed, skip_rembg=skip_rembg)

@@ -4,6 +4,7 @@ import os
 import runpy
 import sys
 import unittest
+from contextlib import redirect_stdout
 from types import SimpleNamespace
 from unittest.mock import Mock, patch
 
@@ -14,11 +15,24 @@ class RunpodWorkerTests(unittest.TestCase):
     def test_source_entrypoint_registers_handler(self):
         start = Mock()
         sdk = SimpleNamespace(serverless=SimpleNamespace(start=start))
-        with patch.dict(sys.modules, {"runpod": sdk}), patch.dict(os.environ, {}, clear=True):
+        stdout = io.StringIO()
+        with patch.dict(sys.modules, {"runpod": sdk}), \
+             patch.dict(os.environ, {"PIXAL3D_STAGE_TRACE": "1"}, clear=True), \
+             patch("faulthandler.dump_traceback_later") as arm, \
+             patch("faulthandler.cancel_dump_traceback_later") as disarm, redirect_stdout(stdout):
             runpy.run_module("rp_handler", run_name="__main__")
+            handler = start.call_args.args[0]["handler"]
+            self.assertIn("error", handler({"id": "test-job", "input": {}}))
         start.assert_called_once()
-        handler = start.call_args.args[0]["handler"]
-        self.assertIn("error", handler({"input": {}}))
+        self.assertEqual(arm.call_count, 2)
+        disarm.assert_called_once()
+        markers = stdout.getvalue().splitlines()
+        self.assertIn("Python entrypoint reached", markers[0])
+        self.assertIn("Importing Runpod SDK", markers[1])
+        self.assertIn("Runpod SDK imported", markers[2])
+        self.assertIn("Registering handler", markers[3])
+        self.assertEqual(markers[4], "[request test-job] Entered handler")
+        self.assertIn("Handler returned", markers[5])
 
     def test_base64_input_and_output(self):
         def infer(source, output, *, seed, skip_rembg):

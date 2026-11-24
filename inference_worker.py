@@ -22,15 +22,16 @@ from scripts.model_cache import (
     use_global_volume,
 )
 
-configure_cache()
-import torch
-
-
 PIXAL_DIR = Path("/app/Pixal3D")
 
 
 def _log(message: str) -> None:
     print(f"[inference] {message}", flush=True)
+
+
+_log("Configuring writable caches and importing PyTorch")
+configure_cache()
+import torch
 
 
 def _autodetect_attn_backend() -> str:
@@ -52,11 +53,13 @@ def _autodetect_attn_backend() -> str:
     return backend
 
 
+_log("Checking CUDA availability")
 if not torch.cuda.is_available():
     raise RuntimeError("Pixal3D inference requires a CUDA-enabled GPU.")
 _autodetect_attn_backend()
 sys.path.insert(0, str(PIXAL_DIR))
 
+_log("Importing o_voxel, FlexGEMM and model classes")
 import numpy as np
 import o_voxel
 from PIL import Image
@@ -78,7 +81,9 @@ def _prepare_global_models() -> None:
 
 GLOBAL_MODELS = use_global_volume()
 if GLOBAL_MODELS:
+    _log("Verifying prefetched Global Volume model files")
     _prepare_global_models()
+    _log("Global Volume model files verified")
 
 
 IMAGE_COND_CONFIGS = {
@@ -192,6 +197,7 @@ def _estimate_camera(image: Image.Image, mesh_scale: float, extend_pixel: int, i
 
 def run_inference(input_image: Path, output_glb: Path, *, seed: int, skip_rembg: bool) -> dict:
     t_start = time.monotonic()
+    _log("Preprocessing input image")
     with Image.open(input_image) as image:
         if skip_rembg:
             image_for_pipeline = image.convert("RGB")
@@ -199,8 +205,10 @@ def run_inference(input_image: Path, output_glb: Path, *, seed: int, skip_rembg:
         else:
             image_for_pipeline = PIPELINE.preprocess_image(image)
 
+    _log("Estimating camera with MoGe-2")
     camera_params = _estimate_camera(image_for_pipeline, mesh_scale=1.0, extend_pixel=0, image_resolution=512)
 
+    _log("Running Pixal3D mesh and texture generation")
     torch.manual_seed(seed)
     mesh_list, (_shape_slat, _tex_slat, grid_res) = PIPELINE.run(
         image_for_pipeline,
@@ -213,6 +221,7 @@ def run_inference(input_image: Path, output_glb: Path, *, seed: int, skip_rembg:
     )
     mesh = mesh_list[0]
 
+    _log("Exporting textured GLB")
     glb = o_voxel.postprocess.to_glb(
         vertices=mesh.vertices, faces=mesh.faces, attr_volume=mesh.attrs,
         coords=mesh.coords, attr_layout=PIPELINE.pbr_attr_layout,
