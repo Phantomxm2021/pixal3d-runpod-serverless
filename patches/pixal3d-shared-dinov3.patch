@@ -1,18 +1,126 @@
+diff --git a/pixal3d/pipelines/pixal3d_image_to_3d.py b/pixal3d/pipelines/pixal3d_image_to_3d.py
+index 7129482..24d446f 100644
+--- a/pixal3d/pipelines/pixal3d_image_to_3d.py
++++ b/pixal3d/pipelines/pixal3d_image_to_3d.py
+@@ -620,4 +620,6 @@ class Pixal3DImageTo3DPipeline(Pipeline):
+         pipeline_type: Optional[str] = None,
+         max_num_tokens: int = 49152,
++        *,
++        stage_finished: Optional[Callable[[str], None]] = None,
+     ) -> List[MeshWithVoxel]:
+         """
+@@ -639,4 +641,5 @@ class Pixal3DImageTo3DPipeline(Pipeline):
+             pipeline_type (str): The type of the pipeline. Options: '1024_cascade', '1536_cascade'.
+             max_num_tokens (int): The maximum number of tokens to use.
++            stage_finished: Optional callback after each generation stage.
+         """
+         # Check pipeline type
+@@ -685,4 +688,6 @@ class Pixal3DImageTo3DPipeline(Pipeline):
+         del cond_ss
+         torch.cuda.empty_cache()
++        if stage_finished is not None:
++            stage_finished("sparse_structure")
+
+         # ---- Stage 2: Shape LR 512 (proj) ----
+@@ -699,4 +704,6 @@ class Pixal3DImageTo3DPipeline(Pipeline):
+         del cond_shape_lr
+         torch.cuda.empty_cache()
++        if stage_finished is not None:
++            stage_finished("shape_low")
+
+         # ---- Stage 3a: Upsample LR → HR ----
+@@ -726,4 +733,6 @@ class Pixal3DImageTo3DPipeline(Pipeline):
+         del lr_slat, hr_coords, quant_coords
+         torch.cuda.empty_cache()
++        if stage_finished is not None:
++            stage_finished("shape_upsample")
+
+         # ---- Stage 3b: Shape HR (proj) ----
+@@ -758,4 +767,6 @@ class Pixal3DImageTo3DPipeline(Pipeline):
+         del cond_shape_hr, noise_hr, hr_slat, hr_coords_unique
+         torch.cuda.empty_cache()
++        if stage_finished is not None:
++            stage_finished("shape_high")
+
+         # ---- Stage 4: Texture (proj) ----
+@@ -774,8 +785,12 @@ class Pixal3DImageTo3DPipeline(Pipeline):
+         del cond_tex
+         torch.cuda.empty_cache()
++        if stage_finished is not None:
++            stage_finished("texture")
+
+         # ---- Stage 5: Decode ----
+         res = actual_hr_resolution
+         out_mesh = self.decode_latent(shape_slat, tex_slat, res)
++        if stage_finished is not None:
++            stage_finished("decode")
+         if return_latent:
+             return out_mesh, (shape_slat, tex_slat, res)
 diff --git a/pixal3d/trainers/flow_matching/mixins/image_conditioned_proj.py b/pixal3d/trainers/flow_matching/mixins/image_conditioned_proj.py
+index 0f721e0..f5d67e7 100644
 --- a/pixal3d/trainers/flow_matching/mixins/image_conditioned_proj.py
 +++ b/pixal3d/trainers/flow_matching/mixins/image_conditioned_proj.py
-@@ -463,6 +463,8 @@ class DinoV3ProjFeatureExtractor(nn.Module):
-         image_size: int = 512,
-         grid_resolution: int = 16,
+@@ -6,4 +6,6 @@ supporting camera-aware 3D-to-2D feature mapping.
+ """
+
++from contextlib import contextmanager
++from contextvars import ContextVar
+ from typing import *
+ import os
+@@ -438,4 +440,18 @@ def compute_relative_calc_mat(
+ # =============================================================================
+
++_dinov3_request = ContextVar("dinov3_request", default=None)
++
++
++@contextmanager
++def cache_dinov3_features(image: Image.Image):
++    """Reuse frozen backbone features for the same PIL image within one request."""
++    features = {}
++    token = _dinov3_request.set((image, features))
++    try:
++        yield
++    finally:
++        _dinov3_request.reset(token)
++
++
+ class DinoV3ProjFeatureExtractor(nn.Module):
+     """
+@@ -465,4 +481,6 @@ class DinoV3ProjFeatureExtractor(nn.Module):
          use_naf_upsample: bool = False,
          naf_target_size: Optional[List[int]] = None,
 +        *,
 +        dino_model: Optional[DINOv3ViTModel] = None,
      ):
          super().__init__()
-@@ -480,4 +482,4 @@ class DinoV3ProjFeatureExtractor(nn.Module):
+@@ -479,5 +497,5 @@ class DinoV3ProjFeatureExtractor(nn.Module):
+         
          # Load DINOv3 model (frozen, no trainable params in this module)
 -        self.model = DINOv3ViTModel.from_pretrained(model_name)
 +        self.model = DINOv3ViTModel.from_pretrained(model_name) if dino_model is None else dino_model
          self.model.eval()
          self.model.requires_grad_(False)
+@@ -582,4 +600,12 @@ class DinoV3ProjFeatureExtractor(nn.Module):
+               where proj_channels = embed_dim (no NAF) or embed_dim*2 (with NAF)
+         """
++        request = _dinov3_request.get()
++        cache = None
++        if (request is not None and not self.training and isinstance(image, list)
++                and len(image) == 1 and image[0] is request[0]):
++            weight = self.model.embeddings.patch_embeddings.weight
++            cache_key = (self.model, self.image_size, weight.device, weight.dtype)
++            cache = request[1]
++
+         # Handle input types
+         if isinstance(image, torch.Tensor):
+@@ -605,5 +631,9 @@ class DinoV3ProjFeatureExtractor(nn.Module):
+         # Extract DINOv3 features (frozen, no gradients)
+         with torch.no_grad():
+-            z = self.extract_features(image)
++            z = cache.get(cache_key) if cache is not None else None
++            if z is None:
++                z = self.extract_features(image)
++                if cache is not None:
++                    cache[cache_key] = z
+             
+             # Split into CLS token, register tokens, and patch tokens

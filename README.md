@@ -36,7 +36,7 @@ Set `PIXAL3D_MODEL_REVISION` to the full Hugging Face commit SHA shown in the en
 
 Compare the job's `delayTime` in milliseconds with `output.timing.model_load_seconds` on the first job that loads the models. The load time includes the Pixal3D pipeline, auxiliary models, and transfer to the GPU. `pixal3d_pipeline_load_seconds` measures the initial pipeline load before that transfer.
 
-The conditioning stages share one DINOv3 instance and one NAF instance. The cold job reports `moge_checkpoint_read_seconds`, `moge_cpu_init_seconds`, and `moge_cuda_transfer_seconds` for MoGe-2. CPU initialization is also broken down into `moge_model_create_seconds` and `moge_state_dict_load_seconds`.
+The conditioning stages share one DINOv3 instance and one NAF instance. Each request reuses DINOv3 features for stages with the same image resolution. The cold job reports worker import time, model loading and CUDA transfers, and the MoGe-2 checkpoint read, CPU initialization, and state-dict load. All generation jobs report preprocessing, camera estimation, sampling and decoding, GLB post-processing and encoding, and delivery time.
 
 During MoGe-2 startup, the container logs process RSS and its high-water mark along with available cgroup usage, peak, limit, and OOM counters. An observer reports the inference process exit status and counter changes if it survives the exit.
 
@@ -69,20 +69,20 @@ curl -fsS "https://api.runpod.ai/v2/$RUNPOD_ENDPOINT_ID/status/$JOB_ID" \
 | `suffix` | Optional input extension. Defaults to `.png`. |
 | `seed` | Integer. Defaults to `42`. |
 | `skip_rembg` | Boolean. Defaults to `false`. Set `true` for images that are already prepared as clean RGB inputs. |
-| `output_format` | `base64` (default) or `url`. |
+| `output_format` | `auto` (default), `base64`, or `url`. |
 
 The response includes `filename`, `mime_type`, `size_bytes`, `timing`, and either `glb_base64` or `glb_url`. Invalid inputs and inference errors surface as a Runpod job error. Inference exception details are available in the worker logs.
 
 ### Return large GLB files through S3
 
-Inline output supports GLBs up to 7 MB so the Base64 response fits both Runpod queue operations. For larger GLBs, set `output_format` to `url` and configure these environment variables on the endpoint:
+Inline output supports GLBs up to 7 MB so the Base64 response fits both Runpod queue operations. The default `auto` uploads larger files when a bucket is configured. Request `url` to upload every GLB or `base64` to require inline delivery. Configure these environment variables on the endpoint for URL output.
 
 | Variable | Value |
 |---|---|
 | `PIXAL3D_OUTPUT_BUCKET` | S3 bucket name. |
 | `AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY` | Credentials with permission to write and read objects under `pixal3d/`. |
-| `AWS_DEFAULT_REGION` | Bucket region. |
-| `PIXAL3D_OUTPUT_ENDPOINT_URL` | Optional service URL for an S3-compatible provider. |
+| `AWS_DEFAULT_REGION` | Bucket region. Use `auto` for Cloudflare R2. |
+| `PIXAL3D_OUTPUT_ENDPOINT_URL` | Optional S3-compatible API endpoint, such as the R2 S3 API URL shown in the bucket settings. |
 
 The worker returns a presigned `glb_url` that expires after one hour. Use a bucket lifecycle rule if the stored GLBs should expire as well.
 

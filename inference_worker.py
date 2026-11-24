@@ -74,6 +74,7 @@ from moge.model.v2 import MoGeModel
 from pixal3d.pipelines import Pixal3DImageTo3DPipeline
 from pixal3d.trainers.flow_matching.mixins.image_conditioned_proj import (
     DinoV3ProjFeatureExtractor,
+    cache_dinov3_features,
 )
 
 
@@ -129,7 +130,7 @@ def _load_pixal3d_pipeline() -> Pixal3DImageTo3DPipeline:
         return Pixal3DImageTo3DPipeline.from_pretrained(str(pipeline_dir))
 
 
-def _prepare_pipeline(pipeline: Pixal3DImageTo3DPipeline) -> None:
+def _prepare_pipeline(pipeline: Pixal3DImageTo3DPipeline) -> dict[str, float]:
     dino_path = str(GLOBAL_MODEL_ROOT / "dinov3") if GLOBAL_MODELS else DINO_MODEL_NAME
     _log(f"Loading shared DINOv3 from {dino_path}")
     started = time.monotonic()
@@ -141,13 +142,30 @@ def _prepare_pipeline(pipeline: Pixal3DImageTo3DPipeline) -> None:
         dino_model = cond_model.model
         cond_models.append(cond_model)
         setattr(pipeline, f"image_cond_model_{stage}", cond_model)
-    _log(f"Shared DINOv3 and {len(cond_models)} projection modules ready in {time.monotonic() - started:.2f}s")
+    dino_seconds = round(time.monotonic() - started, 2)
+    _log(f"Shared DINOv3 and {len(cond_models)} projection modules ready in {dino_seconds:.2f}s")
 
     pipeline.low_vram = False
+    _log("Transferring Pixal3D pipeline to CUDA")
+    started = time.monotonic()
     pipeline.cuda()
+    torch.cuda.synchronize()
+    pipeline_cuda_seconds = round(time.monotonic() - started, 2)
+    _log(f"Pixal3D pipeline CUDA transfer complete in {pipeline_cuda_seconds:.2f}s")
+
+    _log("Transferring DINOv3 and projection modules to CUDA")
+    started = time.monotonic()
     for cond_model in cond_models:
         cond_model.cuda()
+    torch.cuda.synchronize()
+    dino_cuda_seconds = round(time.monotonic() - started, 2)
+    _log(f"DINOv3 and projection CUDA transfer complete in {dino_cuda_seconds:.2f}s")
 
+    timings = {
+        "dinov3_and_projection_load_seconds": dino_seconds,
+        "pixal3d_pipeline_cuda_seconds": pipeline_cuda_seconds,
+        "dinov3_and_projection_cuda_seconds": dino_cuda_seconds,
+    }
     naf_users = [cond_model for cond_model in cond_models if cond_model.use_naf_upsample]
     if naf_users:
         _log("Loading shared NAF for image conditioning")
@@ -156,7 +174,10 @@ def _prepare_pipeline(pipeline: Pixal3DImageTo3DPipeline) -> None:
         first_user._load_naf()
         for cond_model in other_users:
             cond_model.naf_model = first_user.naf_model
-        _log(f"Shared NAF ready for {len(naf_users)} projection modules in {time.monotonic() - started:.2f}s")
+        torch.cuda.synchronize()
+        timings["naf_load_seconds"] = round(time.monotonic() - started, 2)
+        _log(f"Shared NAF ready for {len(naf_users)} projection modules in {timings['naf_load_seconds']:.2f}s")
+    return timings
 
 
 def _build_moge() -> tuple[MoGeModel, dict[str, float]]:
@@ -218,7 +239,7 @@ try:
     PIPELINE = _load_pixal3d_pipeline()
     _pipeline_load_seconds = time.monotonic() - _load_start
     _log(f"Pixal3D pipeline load complete in {_pipeline_load_seconds:.2f}s")
-    _prepare_pipeline(PIPELINE)
+    _conditioning_timings = _prepare_pipeline(PIPELINE)
     MOGE_MODEL, _moge_timings = _build_moge()
 except Exception:
     _log(f"Model load failed after {time.monotonic() - _load_start:.2f}s")
@@ -228,6 +249,7 @@ finally:
 MODEL_LOAD_TIMINGS = {
     "pixal3d_pipeline_load_seconds": round(_pipeline_load_seconds, 2),
     "model_load_seconds": round(time.monotonic() - _load_start, 2),
+    **_conditioning_timings,
     **_moge_timings,
 }
 _log(f"Model load complete in {MODEL_LOAD_TIMINGS['model_load_seconds']:.2f}s")
@@ -269,6 +291,18 @@ def _estimate_camera(image: Image.Image, mesh_scale: float, extend_pixel: int, i
 
 def run_inference(input_image: Path, output_glb: Path, *, seed: int, skip_rembg: bool) -> dict:
     t_start = time.monotonic()
+    stage_start = t_start
+    timings = {}
+
+    def finish_stage(name: str) -> None:
+        nonlocal stage_start
+        torch.cuda.synchronize()
+        now = time.monotonic()
+        seconds = round(now - stage_start, 2)
+        timings[f"{name}_seconds"] = seconds
+        _log(f"{name} complete in {seconds:.2f}s")
+        stage_start = time.monotonic()
+
     _log("Preprocessing input image")
     with Image.open(input_image) as image:
         if skip_rembg:
@@ -276,21 +310,27 @@ def run_inference(input_image: Path, output_glb: Path, *, seed: int, skip_rembg:
             image_for_pipeline.thumbnail((1024, 1024), Image.Resampling.LANCZOS)
         else:
             image_for_pipeline = PIPELINE.preprocess_image(image)
+    finish_stage("preprocess")
 
     _log("Estimating camera with MoGe-2")
     camera_params = _estimate_camera(image_for_pipeline, mesh_scale=1.0, extend_pixel=0, image_resolution=512)
+    finish_stage("camera")
 
     _log("Running Pixal3D mesh and texture generation")
+    generation_start = time.monotonic()
     torch.manual_seed(seed)
-    mesh_list, (_shape_slat, _tex_slat, grid_res) = PIPELINE.run(
-        image_for_pipeline,
-        camera_params=camera_params,
-        seed=seed,
-        preprocess_image=False,
-        return_latent=True,
-        pipeline_type="1024_cascade",
-        max_num_tokens=49152,
-    )
+    with cache_dinov3_features(image_for_pipeline):
+        mesh_list, (_shape_slat, _tex_slat, grid_res) = PIPELINE.run(
+            image_for_pipeline,
+            camera_params=camera_params,
+            seed=seed,
+            preprocess_image=False,
+            return_latent=True,
+            pipeline_type="1024_cascade",
+            max_num_tokens=49152,
+            stage_finished=finish_stage,
+        )
+    timings["generation_seconds"] = round(time.monotonic() - generation_start, 2)
     mesh = mesh_list[0]
 
     _log("Exporting textured GLB")
@@ -302,6 +342,7 @@ def run_inference(input_image: Path, output_glb: Path, *, seed: int, skip_rembg:
         decimation_target=200000, texture_size=2048,
         remesh=True, remesh_band=1, remesh_project=0, use_tqdm=False,
     )
+    finish_stage("glb_postprocess")
 
     rot = np.array([
         [-1,  0,  0, 0],
@@ -312,4 +353,5 @@ def run_inference(input_image: Path, output_glb: Path, *, seed: int, skip_rembg:
     glb.apply_transform(rot)
 
     glb.export(str(output_glb), extension_webp=True)
-    return {"inference_seconds": round(time.monotonic() - t_start, 2)}
+    finish_stage("glb_encode")
+    return {"inference_seconds": round(time.monotonic() - t_start, 2), **timings}

@@ -70,11 +70,15 @@ def _upload_glb(path: Path, bucket: str) -> str:
 def _run_inference(input_path: Path, output_path: Path, *, seed: int, skip_rembg: bool) -> dict:
     print("[request] Importing inference worker", flush=True)
     cold = "inference_worker" not in sys.modules
+    started = time.monotonic()
     from inference_worker import MODEL_LOAD_TIMINGS, run_inference
 
-    print("[request] Inference worker ready, starting inference", flush=True)
+    worker_ready_seconds = round(time.monotonic() - started, 2)
+    print(f"[request] Inference worker ready in {worker_ready_seconds:.2f}s, starting inference", flush=True)
     timing = run_inference(input_path, output_path, seed=seed, skip_rembg=skip_rembg)
-    return {**MODEL_LOAD_TIMINGS, **timing} if cold else timing
+    if cold:
+        return {"worker_ready_seconds": worker_ready_seconds, **MODEL_LOAD_TIMINGS, **timing}
+    return timing
 
 
 def handler(job: dict) -> dict:
@@ -140,9 +144,9 @@ def handler(job: dict) -> dict:
     if not isinstance(skip_rembg, bool):
         return {"error": "input.skip_rembg must be a boolean."}
 
-    output_format = inputs.get("output_format", "base64")
-    if output_format not in ("base64", "url"):
-        return {"error": "input.output_format must be base64 or url."}
+    output_format = inputs.get("output_format", "auto")
+    if output_format not in ("auto", "base64", "url"):
+        return {"error": "input.output_format must be auto, base64 or url."}
     bucket = os.environ.get("PIXAL3D_OUTPUT_BUCKET")
     if output_format == "url" and not bucket:
         return {"error": "Set PIXAL3D_OUTPUT_BUCKET on the endpoint to use URL output."}
@@ -172,6 +176,10 @@ def handler(job: dict) -> dict:
         if not size:
             return {"error": "Inference finished but produced no GLB."}
 
+        print(f"[request] GLB generated ({size} bytes)", flush=True)
+        if output_format == "auto":
+            output_format = "url" if size > MAX_INLINE_GLB_BYTES and bucket else "base64"
+
         result = {
             "filename": output_path.name,
             "mime_type": GLB_MIME_TYPE,
@@ -186,9 +194,10 @@ def handler(job: dict) -> dict:
                 LOGGER.exception("GLB upload failed")
                 return {"error": "GLB upload failed. Check the worker's S3 configuration and logs."}
             result["timing"]["upload_seconds"] = round(time.monotonic() - started, 2)
+            print(f"[request] GLB uploaded in {result['timing']['upload_seconds']:.2f}s", flush=True)
         else:
             if size > MAX_INLINE_GLB_BYTES:
-                return {"error": "GLB exceeds the 7 MB inline limit. Use input.output_format=url."}
+                return {"error": "GLB exceeds the 7 MB inline limit. Configure PIXAL3D_OUTPUT_BUCKET and use input.output_format=url."}
             result["glb_base64"] = base64.b64encode(output_path.read_bytes()).decode("ascii")
             result["timing"]["encode_seconds"] = round(time.monotonic() - started, 2)
         return result

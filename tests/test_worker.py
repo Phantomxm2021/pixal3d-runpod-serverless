@@ -65,13 +65,35 @@ class RunpodWorkerTests(unittest.TestCase):
         with patch.object(worker, "urlopen", download), patch.object(worker, "_upload_glb", upload), \
              patch.object(worker, "_run_inference", side_effect=infer), \
              patch.object(worker, "MAX_INLINE_GLB_BYTES", 4), \
-             patch.dict(os.environ, {"PIXAL3D_OUTPUT_BUCKET": "results"}):
+             patch.dict(os.environ, {}, clear=True):
             self.assertIn("exceeds", worker.handler({"input": inputs})["error"])
-            result = worker.handler({"input": {**inputs, "output_format": "url"}})
-        upload.assert_called_once()
+            upload.assert_not_called()
+            with patch.dict(os.environ, {"PIXAL3D_OUTPUT_BUCKET": "results"}):
+                strict_inline = worker.handler({"input": {**inputs, "output_format": "base64"}})
+                self.assertIn("exceeds", strict_inline["error"])
+                upload.assert_not_called()
+                for output_format in ("auto", "url"):
+                    result = worker.handler({"input": {**inputs, "output_format": output_format}})
+                    self.assertEqual(result["glb_url"], upload.return_value)
+                    self.assertEqual(result["size_bytes"], 9)
+                    self.assertIn("upload_seconds", result["timing"])
+                result = worker.handler({"input": inputs})
+        self.assertEqual(upload.call_count, 3)
         self.assertEqual(upload.call_args.args[1], "results")
         self.assertFalse(upload.call_args.args[0].exists())
         self.assertEqual(result["glb_url"], upload.return_value)
+
+    def test_auto_keeps_small_glb_inline_when_bucket_is_configured(self):
+        def infer(source, output, **kwargs):
+            output.write_bytes(b"glTF")
+            return {}
+
+        with patch.object(worker, "_run_inference", side_effect=infer), \
+             patch.object(worker, "_upload_glb") as upload, \
+             patch.dict(os.environ, {"PIXAL3D_OUTPUT_BUCKET": "results"}, clear=True):
+            result = worker.handler({"input": {"image_base64": "aW1hZ2U="}})
+        self.assertEqual(base64.b64decode(result["glb_base64"]), b"glTF")
+        upload.assert_not_called()
 
     def test_invalid_jobs_do_not_start_inference(self):
         invalid = [
