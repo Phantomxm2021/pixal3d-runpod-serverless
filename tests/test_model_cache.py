@@ -1,15 +1,59 @@
 import json
+import os
 import sys
 import tempfile
 import unittest
 from pathlib import Path
 from types import SimpleNamespace
-from unittest.mock import Mock, patch
+from unittest.mock import Mock, call, patch
 
 from scripts.model_cache import pipeline_snapshot, runpod_pipeline_snapshot
 
 
 class PipelineSnapshotTests(unittest.TestCase):
+    def test_pinned_revision_ignores_stale_ref_and_repairs_only_incomplete_files(self):
+        with tempfile.TemporaryDirectory() as directory:
+            hub = Path(directory)
+            repo = hub / "models--TencentARC--Pixal3D"
+            revision = "b" * 40
+            snapshot = repo / "snapshots" / revision
+            (snapshot / "ckpts").mkdir(parents=True)
+            (repo / "refs").mkdir()
+            (repo / "refs/main").write_text("a" * 40, encoding="utf-8")
+            config = {"args": {"models": {"decoder": "ckpts/decoder"}}}
+            contents = {
+                "pipeline.json": json.dumps(config).encode(),
+                "ckpts/decoder.json": b"{}",
+                "ckpts/decoder.safetensors": b"complete weights",
+            }
+            (snapshot / "ckpts/decoder.json").write_bytes(contents["ckpts/decoder.json"])
+            (snapshot / "ckpts/decoder.safetensors").touch()
+
+            def download(_repo, name, **_kwargs):
+                (snapshot / name).write_bytes(contents[name])
+
+            api = Mock()
+            api.model_info.return_value = SimpleNamespace(
+                sha=revision, siblings=[SimpleNamespace(rfilename=name, size=len(data))
+                                       for name, data in contents.items()],
+            )
+            sdk = SimpleNamespace(HfApi=Mock(return_value=api), hf_hub_download=Mock(side_effect=download))
+            with patch.dict(os.environ, {"PIXAL3D_MODEL_REVISION": revision}), \
+                 patch.dict(sys.modules, {"huggingface_hub": sdk}), \
+                 patch("scripts.model_cache.RUNPOD_MODEL_HUB", hub):
+                with self.assertRaisesRegex(RuntimeError, "pipeline.json"):
+                    runpod_pipeline_snapshot()
+                self.assertEqual(runpod_pipeline_snapshot(repair=True), (snapshot, config))
+                self.assertEqual(sdk.hf_hub_download.call_args_list, [
+                    call("TencentARC/Pixal3D", "pipeline.json", revision=revision, cache_dir=hub,
+                         force_download=False),
+                    call("TencentARC/Pixal3D", "ckpts/decoder.safetensors", revision=revision, cache_dir=hub,
+                         force_download=True),
+                ])
+                sdk.hf_hub_download.reset_mock()
+                self.assertEqual(runpod_pipeline_snapshot(), (snapshot, config))
+                sdk.hf_hub_download.assert_not_called()
+
     def test_runpod_snapshot_uses_refs_and_requires_checkpoint_blobs(self):
         with tempfile.TemporaryDirectory() as directory:
             hub = Path(directory)

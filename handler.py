@@ -94,6 +94,22 @@ def handler(job: dict) -> dict:
             LOGGER.exception("Global Volume prefill failed")
             return {"error": f"Global Volume prefill failed: {exc}"}
 
+    if inputs.get("action") == "prepare_node_cache":
+        from scripts.model_cache import pipeline_checkpoint_files, runpod_pipeline_snapshot, use_runpod_model_cache
+
+        if not use_runpod_model_cache():
+            return {"error": "This worker does not use the Runpod node model cache."}
+        try:
+            snapshot, config = runpod_pipeline_snapshot(repair=True)
+            files = {"pipeline.json", *pipeline_checkpoint_files(config)}
+            return {
+                "status": "ready", "revision": snapshot.name, "files": len(files),
+                "model_bytes": sum((snapshot / name).stat().st_size for name in files),
+            }
+        except Exception as exc:
+            LOGGER.exception("Runpod node cache preparation failed")
+            return {"error": f"Runpod node cache preparation failed: {exc}"}
+
     image_url = inputs.get("image_url")
     image_base64 = inputs.get("image_base64")
     if not image_url and not image_base64:

@@ -61,26 +61,60 @@ def pipeline_checkpoint_files(config: dict) -> list[str]:
     ]
 
 
-def runpod_pipeline_snapshot() -> tuple[Path, dict]:
-    repo = RUNPOD_MODEL_HUB / f"models--{PIXAL3D_MODEL_NAME.replace('/', '--')}"
-    snapshots = repo / "snapshots"
+def _runpod_revision(repo: Path) -> str:
+    pinned = os.environ.get("PIXAL3D_MODEL_REVISION")
+    if pinned is not None:
+        return pinned
     try:
-        try:
-            revision = (repo / "refs/main").read_text(encoding="utf-8").strip()
-        except FileNotFoundError:
-            revisions = [path.name for path in snapshots.iterdir() if path.is_dir()]
-            if len(revisions) != 1:
-                raise ValueError("Expected one snapshot when refs/main is unavailable.")
-            revision, = revisions
+        return (repo / "refs/main").read_text(encoding="utf-8").strip()
+    except FileNotFoundError:
+        revisions = [path.name for path in (repo / "snapshots").iterdir() if path.is_dir()]
+        if len(revisions) != 1:
+            raise ValueError("Expected one snapshot when refs/main is unavailable.")
+        return revisions[0]
+
+
+def runpod_pipeline_snapshot(*, repair: bool = False) -> tuple[Path, dict]:
+    repo = RUNPOD_MODEL_HUB / f"models--{PIXAL3D_MODEL_NAME.replace('/', '--')}"
+    try:
+        pinned = "PIXAL3D_MODEL_REVISION" in os.environ
+        if repair and not pinned:
+            raise ValueError("Set PIXAL3D_MODEL_REVISION before repairing the node cache.")
+        revision = _runpod_revision(repo)
         if not re.fullmatch(r"[a-f0-9]{40}", revision):
             raise ValueError(f"Invalid snapshot revision: {revision!r}")
 
-        snapshot = snapshots / revision
-        config = json.loads((snapshot / "pipeline.json").read_text(encoding="utf-8"))
-        for filename in pipeline_checkpoint_files(config):
+        snapshot = repo / "snapshots" / revision
+        sizes = None
+        if pinned:
+            from huggingface_hub import HfApi
+
+            info = HfApi().model_info(PIXAL3D_MODEL_NAME, revision=revision, files_metadata=True, timeout=15)
+            if info.sha != revision:
+                raise ValueError(f"Hugging Face returned an unexpected revision: {info.sha!r}")
+            sizes = {entry.rfilename: entry.size for entry in info.siblings}
+
+        def check_file(filename: str) -> Path:
             path = snapshot / filename
-            if not path.is_file() or path.stat().st_size == 0:
-                raise ValueError(f"Model checkpoint is missing or empty: {filename}")
+            expected = sizes.get(filename) if sizes is not None else None
+            if sizes is not None and (type(expected) is not int or expected <= 0):
+                raise ValueError(f"No valid size in revision {revision} for {filename}")
+            present = path.is_file()
+            actual = path.stat().st_size if present else 0
+            if repair and actual != expected:
+                from huggingface_hub import hf_hub_download
+
+                print(f"[cache] Repairing {revision}/{filename}", flush=True)
+                hf_hub_download(PIXAL3D_MODEL_NAME, filename, revision=revision,
+                                cache_dir=RUNPOD_MODEL_HUB, force_download=present)
+                actual = path.stat().st_size if path.is_file() else 0
+            if actual <= 0 or (expected is not None and actual != expected):
+                raise ValueError(f"Incomplete {snapshot / filename}: {actual} bytes, expected {expected or 'nonempty'}")
+            return path
+
+        config = json.loads(check_file("pipeline.json").read_text(encoding="utf-8"))
+        for filename in pipeline_checkpoint_files(config):
+            check_file(filename)
         return snapshot, config
     except (OSError, ValueError, TypeError, KeyError, AttributeError) as exc:
         raise RuntimeError(f"Runpod node model cache is missing or incomplete at {repo}: {exc}") from exc

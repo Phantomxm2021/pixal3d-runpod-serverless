@@ -32,6 +32,8 @@ To populate a new volume, temporarily set `PIXAL3D_PREFILL_ONLY=1` and **Max wor
 
 Set the endpoint's **Model** to `TencentARC/Pixal3D` and add `PIXAL3D_RUNPOD_MODEL_CACHE=1`. The worker loads the single-image Pixal3D checkpoints from Runpod's cached Hugging Face snapshot under `/runpod-volume/huggingface-cache/hub` and fails if the required files are missing. Keep `PIXAL3D_GLOBAL_VOLUME=1` with the prefetched volume attached for MoGe-2, DINOv3, and NAF. BiRefNet loads from the container image. [Runpod cached models](https://docs.runpod.io/serverless/endpoints/model-caching)
 
+Set `PIXAL3D_MODEL_REVISION` to the full Hugging Face commit SHA shown in the endpoint's **Model** field when that field is pinned. The worker verifies `pipeline.json` and its checkpoints against the file sizes for that commit. Send `{"input":{"action":"prepare_node_cache"}}` to verify and repair a writable node cache without running inference. A `ready` response includes the verified revision, file count, and total bytes.
+
 Compare the job's `delayTime` in milliseconds with `output.timing.model_load_seconds` on the first job that loads the models. The load time includes the Pixal3D pipeline, auxiliary models, and transfer to the GPU. `pixal3d_pipeline_load_seconds` measures the initial pipeline load before that transfer.
 
 The conditioning stages share one DINOv3 instance and one NAF instance. The cold job reports `moge_checkpoint_read_seconds`, `moge_cpu_init_seconds`, and `moge_cuda_transfer_seconds` for MoGe-2. CPU initialization is also broken down into `moge_model_create_seconds` and `moge_state_dict_load_seconds`.
