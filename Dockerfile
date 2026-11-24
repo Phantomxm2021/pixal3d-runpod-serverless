@@ -91,4 +91,4 @@ RUN git -C /app/Pixal3D apply /tmp/pixal3d-shared-dinov3.patch \
         assert torch.version.cuda == '12.4', f'Unexpected PyTorch CUDA version: {torch.version.cuda}'" \
     && python3.10 -c "from handler import handler; assert 'error' in handler({'input': {}})"
 
-CMD ["python3", "-u", "rp_handler.py"]
+CMD ["python3", "-u", "-m", "scripts.worker_diagnostics"]

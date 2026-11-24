@@ -34,7 +34,9 @@ Set the endpoint's **Model** to `TencentARC/Pixal3D` and add `PIXAL3D_RUNPOD_MOD
 
 Compare the job's `delayTime` in milliseconds with `output.timing.model_load_seconds` on the first job that loads the models. The load time includes the Pixal3D pipeline, auxiliary models, and transfer to the GPU. `pixal3d_pipeline_load_seconds` measures the initial pipeline load before that transfer.
 
-The conditioning stages share one DINOv3 instance and one NAF instance. The cold job also reports `moge_checkpoint_read_seconds`, `moge_cpu_init_seconds`, and `moge_cuda_transfer_seconds` for MoGe-2.
+The conditioning stages share one DINOv3 instance and one NAF instance. The cold job reports `moge_checkpoint_read_seconds`, `moge_cpu_init_seconds`, and `moge_cuda_transfer_seconds` for MoGe-2. CPU initialization is also broken down into `moge_model_create_seconds` and `moge_state_dict_load_seconds`.
+
+During MoGe-2 startup, the container logs process RSS and its high-water mark along with available cgroup usage, peak, limit, and OOM counters. An observer reports the inference process exit status and counter changes if it survives the exit.
 
 ### Deploy from a container image
 

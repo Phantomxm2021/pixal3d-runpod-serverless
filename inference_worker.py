@@ -23,6 +23,7 @@ from scripts.model_cache import (
     use_global_volume,
     use_runpod_model_cache,
 )
+from scripts.worker_diagnostics import memory_stage
 
 PIXAL_DIR = Path("/app/Pixal3D")
 
@@ -166,22 +167,33 @@ def _build_moge() -> tuple[MoGeModel, dict[str, float]]:
         path = Path(hf_hub_download(repo_id=name, repo_type="model", filename="model.pt"))
 
     _log(f"Reading MoGe-2 checkpoint on CPU from {path}")
+    memory_stage("moge_checkpoint_read")
     started = time.monotonic()
     checkpoint = torch.load(path, map_location="cpu", weights_only=True)
     read_seconds = round(time.monotonic() - started, 2)
     _log(f"MoGe-2 checkpoint read complete in {read_seconds:.2f}s")
 
     # Match the pinned MoGeModel.from_pretrained constructor and state-dict options.
-    _log("Initializing MoGe-2 on CPU")
-    started = time.monotonic()
+    _log("Creating MoGe-2 model on CPU")
+    memory_stage("moge_create_model")
+    init_started = time.monotonic()
     m = MoGeModel(**checkpoint["model_config"])
+    create_seconds = round(time.monotonic() - init_started, 2)
+    _log(f"MoGe-2 model creation complete in {create_seconds:.2f}s")
+
+    _log("Loading MoGe-2 state_dict on CPU")
+    memory_stage("moge_load_state_dict")
+    started = time.monotonic()
     m.load_state_dict(checkpoint["model"], strict=False)
+    state_dict_seconds = round(time.monotonic() - started, 2)
+    _log(f"MoGe-2 state_dict load complete in {state_dict_seconds:.2f}s")
     del checkpoint
-    cpu_init_seconds = round(time.monotonic() - started, 2)
+    cpu_init_seconds = round(time.monotonic() - init_started, 2)
     _log(f"MoGe-2 CPU initialization complete in {cpu_init_seconds:.2f}s")
 
     torch.cuda.synchronize()
     _log("Transferring MoGe-2 to CUDA")
+    memory_stage("moge_cuda_transfer")
     started = time.monotonic()
     m = m.to("cuda")
     torch.cuda.synchronize()
@@ -191,6 +203,8 @@ def _build_moge() -> tuple[MoGeModel, dict[str, float]]:
     return m, {
         "moge_checkpoint_read_seconds": read_seconds,
         "moge_cpu_init_seconds": cpu_init_seconds,
+        "moge_model_create_seconds": create_seconds,
+        "moge_state_dict_load_seconds": state_dict_seconds,
         "moge_cuda_transfer_seconds": cuda_seconds,
     }
 
@@ -205,6 +219,8 @@ try:
 except Exception:
     _log(f"Model load failed after {time.monotonic() - _load_start:.2f}s")
     raise
+finally:
+    memory_stage("")
 MODEL_LOAD_TIMINGS = {
     "pixal3d_pipeline_load_seconds": round(_pipeline_load_seconds, 2),
     "model_load_seconds": round(time.monotonic() - _load_start, 2),
