@@ -75,14 +75,17 @@ WORKDIR /app
 COPY rp_handler.py handler.py inference_worker.py /app/
 COPY scripts /app/scripts
 
-# Smoke-test that the install resolves. Catches wheel/ABI mismatches at
-# build time instead of at the first RunPod worker cold start.
+# Runpod's image builder has no GPU. Importing o_voxel or the Pixal3D
+# pipeline initializes FlexGEMM's Triton driver during import. Check that
+# those modules are present here and load them on the GPU worker at startup.
 RUN python3.10 -m pip check \
-    && PYTHONPATH=/app/Pixal3D python3.10 -c "import torch, runpod, boto3, flash_attn, flash_attn_interface, natten, o_voxel; \
+    && PYTHONPATH=/app/Pixal3D python3.10 -c "from importlib.util import find_spec; \
+        import torch, runpod, boto3, flash_attn, flash_attn_interface, natten; \
         from moge.model.v2 import MoGeModel; \
-        from pixal3d.pipelines import Pixal3DImageTo3DPipeline; \
-        from pixal3d.trainers.flow_matching.mixins.image_conditioned_proj import DinoV3ProjFeatureExtractor; \
-        assert torch.version.cuda == '12.4'" \
+        from transformers import DINOv3ViTModel; \
+        missing = [name for name in ('o_voxel', 'flex_gemm', 'pixal3d') if find_spec(name) is None]; \
+        assert not missing, f'Missing worker modules: {missing}'; \
+        assert torch.version.cuda == '12.4', f'Unexpected PyTorch CUDA version: {torch.version.cuda}'" \
     && python3.10 -c "from handler import handler; assert 'error' in handler({'input': {}})"
 
 CMD ["python3", "-u", "rp_handler.py"]
