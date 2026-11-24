@@ -4,9 +4,8 @@ on:
   workflow_dispatch:
     inputs:
       pixal3d_ref:
-        description: "Pixal3D git ref to bake into the image (branch or commit SHA)"
+        description: "Pixal3D branch or commit SHA (blank uses the Dockerfile pin)"
         required: false
-        default: "master"
   push:
     branches: [main]
 
@@ -18,8 +17,18 @@ env:
   IMAGE_NAME: pixal3d-runpod-serverless
 
 jobs:
+  test:
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.10'
+      - run: python -m unittest discover -s tests
+
   build:
     name: Build and push GHCR image
+    needs: test
     runs-on: ubuntu-22.04
 
     steps:
@@ -52,8 +61,7 @@ jobs:
           context: .
           platforms: linux/amd64
           push: true
-          build-args: |
-            PIXAL3D_REF=${{ github.event.inputs.pixal3d_ref || 'master' }}
+          build-args: ${{ inputs.pixal3d_ref && format('PIXAL3D_REF={0}', inputs.pixal3d_ref) || '' }}
           tags: |
             ghcr.io/${{ env.OWNER_LC }}/${{ env.IMAGE_NAME }}:latest
             ghcr.io/${{ env.OWNER_LC }}/${{ env.IMAGE_NAME }}:sha-${{ github.sha }}

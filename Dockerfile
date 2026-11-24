@@ -11,17 +11,6 @@ ENV DEBIAN_FRONTEND=noninteractive \
     CUDA_HOME=/usr/local/cuda \
     PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True \
     OPENCV_IO_ENABLE_OPENEXR=1 \
-    HF_HOME=/runpod-volume/huggingface \
-    HUGGINGFACE_HUB_CACHE=/runpod-volume/huggingface/hub \
-    TORCH_HOME=/runpod-volume/torch \
-    XDG_CACHE_HOME=/runpod-volume/cache \
-    TRITON_CACHE_DIR=/runpod-volume/triton \
-    FLEX_GEMM_AUTOTUNE_CACHE_PATH=/runpod-volume/flex_gemm_autotune.json \
-    PIXAL3D_MODEL_PATH=TencentARC/Pixal3D \
-    MOGE_MODEL_PATH=Ruicheng/moge-2-vitl \
-    BIREFNET_MODEL_PATH=ZhengPeng7/BiRefNet \
-    PIXAL3D_BAKED_HF_CACHE=/opt/hf_baked/hub \
-    PIXAL3D_TIMEOUT=900 \
     PIP_NO_CACHE_DIR=1 \
     PIP_DISABLE_PIP_VERSION_CHECK=1
 
@@ -35,6 +24,8 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
         python3-pip \
         git \
         ca-certificates \
+        gcc \
+        python3.10-dev \
         ffmpeg \
         libgl1 \
         libglib2.0-0 \
@@ -45,15 +36,25 @@ RUN python3.10 -m pip install --upgrade pip
 
 # Pin Pixal3D to a specific ref for reproducibility. Override at build time:
 #   docker build --build-arg PIXAL3D_REF=<commit-sha> .
-ARG PIXAL3D_REF=master
-RUN git clone -b ${PIXAL3D_REF} --depth 1 \
-        https://github.com/TencentARC/Pixal3D.git /app/Pixal3D
+ARG PIXAL3D_REF=f7cf38429b0bd264f1995f0f8743a88b1c728b94
+RUN git init /app/Pixal3D \
+    && git -C /app/Pixal3D fetch --depth 1 https://github.com/TencentARC/Pixal3D.git "$PIXAL3D_REF" \
+    && git -C /app/Pixal3D checkout --detach FETCH_HEAD \
+    && rm -rf /app/Pixal3D/.git
 
 WORKDIR /app/Pixal3D
 
-# Gold-path install: prebuilt cp310 wheels for every native dep, plus torch
-# 2.6.0+cu124 via PyTorch's index. Ships FA3 wheel (Hopper-only).
-RUN python3.10 -m pip install -r requirements-hfdemo.txt
+COPY requirements.txt /app/requirements.txt
+
+# MoGe 3 introduces a source-built FlexGEMM dependency and requires a newer
+# trimesh. The worker uses the MoGe 2 camera estimator.
+ARG MOGE_REF=9642cf99a13fd829a4f7934fd8dab17e7091da9d
+RUN sed -E '/^git\+https:\/\/github\.com\/microsoft\/MoGe\.git/d; /^gradio$/d' \
+        requirements-hfdemo.txt > /tmp/worker-requirements.txt \
+    && python3.10 -m pip install -r /tmp/worker-requirements.txt -r /app/requirements.txt \
+        'torch==2.6.0+cu124' 'torchvision==0.21.0+cu124' \
+        "moge @ git+https://github.com/microsoft/MoGe.git@${MOGE_REF}" \
+    && rm /tmp/worker-requirements.txt
 
 # FlashAttention 2 for Ampere/Ada (A100/A40/4090/L40S). Coexists with FA3 —
 # different package name. Handler chooses backend by GPU capability at boot.
@@ -64,24 +65,24 @@ RUN python3.10 -m pip install \
 RUN python3.10 -m pip install --force-reinstall --no-deps \
         https://github.com/LDYang694/Storages/releases/download/20260430/utils3d-0.0.2-py3-none-any.whl
 
-# RunPod SDK + huggingface_hub. transformers/diffusers/etc are in hfdemo.
-RUN python3.10 -m pip install runpod huggingface_hub
-
-# Bake BiRefNet (ungated, ~880 MB) into the image. The handler seeds the
-# network volume cache from this path at first boot — removes BiRefNet from
-# the HF download path entirely.
-RUN python3.10 -c "import os; from huggingface_hub import snapshot_download; \
-        snapshot_download(os.environ['BIREFNET_MODEL_PATH'], cache_dir=os.environ['PIXAL3D_BAKED_HF_CACHE'])"
+# Load the public background-removal model directly from the image at runtime.
+RUN python3.10 -c "from huggingface_hub import snapshot_download; \
+        snapshot_download('ZhengPeng7/BiRefNet', local_dir='/opt/birefnet', allow_patterns=['*.json', '*.py', '*.safetensors'])" \
+    && rm -rf /opt/birefnet/.cache
 
 WORKDIR /app
 
-COPY handler.py /app/handler.py
+COPY rp_handler.py handler.py inference_worker.py /app/
 COPY scripts /app/scripts
 
 # Smoke-test that the install resolves. Catches wheel/ABI mismatches at
 # build time instead of at the first RunPod worker cold start.
-RUN python3.10 -c "import torch, runpod, flash_attn, transformers, diffusers, accelerate, huggingface_hub; \
-        print('torch', torch.__version__); \
-        print('cuda available (build-time, expected False):', torch.cuda.is_available())"
+RUN python3.10 -m pip check \
+    && PYTHONPATH=/app/Pixal3D python3.10 -c "import torch, runpod, boto3, flash_attn, flash_attn_interface, natten, o_voxel; \
+        from moge.model.v2 import MoGeModel; \
+        from pixal3d.pipelines import Pixal3DImageTo3DPipeline; \
+        from pixal3d.trainers.flow_matching.mixins.image_conditioned_proj import DinoV3ProjFeatureExtractor; \
+        assert torch.version.cuda == '12.4'" \
+    && python3.10 -c "from handler import handler; assert 'error' in handler({'input': {}})"
 
-CMD ["python3.10", "/app/handler.py"]
+CMD ["python3", "-u", "rp_handler.py"]
