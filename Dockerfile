@@ -1,6 +1,5 @@
 # Pixal3D RunPod Serverless worker.
-# Use Pixal3D's prebuilt CUDA dependencies except NATTEN, which needs kernels
-# for the GPU architectures this endpoint can schedule.
+# Use Pixal3D's prebuilt CUDA dependencies and build an Ampere/Ada NATTEN wheel.
 # FA2 added separately for non-Hopper GPUs; handler picks FA2/FA3 at startup.
 
 FROM nvidia/cuda:12.4.1-devel-ubuntu22.04 AS natten-build
@@ -13,18 +12,17 @@ RUN python3.10 -m pip install --no-cache-dir 'cmake==3.31.6' setuptools wheel \
     && python3.10 -m pip install --no-cache-dir \
         --index-url https://download.pytorch.org/whl/cu124 'torch==2.6.0+cu124'
 
-# SM80 cubins cover Ampere and Ada. NATTEN compiles its Hopper kernels as SM90a.
+# Compile only SM80 to fit the Runpod image build time limit. SM80 also runs on Ada.
 # Pin the source archive and inspect the actual cubins without a GPU.
 ARG NATTEN_N_WORKERS=4
-RUN NATTEN_CUDA_ARCH='8.0;9.0' NATTEN_N_WORKERS="${NATTEN_N_WORKERS}" NATTEN_IS_BUILDING_DIST=1 \
-    python3.10 -m pip wheel --no-cache-dir --no-deps --no-build-isolation --wheel-dir /wheels \
+RUN NATTEN_CUDA_ARCH='8.0' NATTEN_N_WORKERS="${NATTEN_N_WORKERS}" NATTEN_IS_BUILDING_DIST=1 \
+    python3.10 -m pip wheel --verbose --no-cache-dir --no-deps --no-build-isolation --wheel-dir /wheels \
         'https://files.pythonhosted.org/packages/46/c9/aa6bd171aa23de07f401131ce2aff0d1cfa036e22ad8e7e8faa9d66b8067/natten-0.21.0.tar.gz#sha256=810aaf179e1a6fdb0a9279d7858d00412a0d3f045e546cada415205215ccd539' \
     && python3.10 -m zipfile -e /wheels/natten-*.whl /tmp/natten-check \
     && cuobjdump --list-elf /tmp/natten-check/natten/libnatten*.so > /tmp/natten-cubins.txt \
     && grep -oE 'sm_[0-9]+a?' /tmp/natten-cubins.txt | sort -u > /tmp/natten-archs.txt \
     && cat /tmp/natten-archs.txt \
     && grep -qx sm_80 /tmp/natten-archs.txt \
-    && grep -qx sm_90a /tmp/natten-archs.txt \
     && rm -rf /tmp/natten-check /tmp/natten-cubins.txt /tmp/natten-archs.txt
 
 FROM nvidia/cuda:12.4.1-runtime-ubuntu22.04
@@ -81,6 +79,11 @@ RUN --mount=type=bind,from=natten-build,source=/wheels,target=/tmp/natten-wheels
         "moge @ git+https://github.com/microsoft/MoGe.git@${MOGE_REF}" \
     && rm /tmp/worker-requirements.txt
 
+# Pixal3D's upstream NATTEN wheel contains SM90 cubins. Keep it isolated from
+# the system SM80 package and select it on Hopper before importing the pipeline.
+RUN python3.10 -m pip install --no-deps --target /opt/natten-hopper \
+    'https://github.com/LDYang694/Storages/releases/download/20260430/natten-0.21.0+torch2.6cu124-cp310-cp310-linux_x86_64.whl#sha256=6efb93997931d8efdb4fa45a4ccd5f11108f6cd8adc876669b6892839b388247'
+
 # FlashAttention 2 for Ampere/Ada (A100/A40/4090/L40S). Coexists with FA3 —
 # different package name. Handler chooses backend by GPU capability at boot.
 RUN python3.10 -m pip install \
@@ -115,6 +118,8 @@ RUN git -C /app/Pixal3D apply /tmp/pixal3d-shared-dinov3.patch \
         assert not missing, f'Missing worker modules: {missing}'; \
         assert torch.version.cuda == '12.4', f'Unexpected PyTorch CUDA version: {torch.version.cuda}'; \
         assert natten.HAS_LIBNATTEN, 'NATTEN native CUDA extension could not load'" \
+    && PYTHONPATH=/opt/natten-hopper python3.10 -c "import natten; \
+        assert natten.__file__.startswith('/opt/natten-hopper/') and natten.HAS_LIBNATTEN" \
     && python3.10 -c "from handler import handler; assert 'error' in handler({'input': {}})"
 
 CMD ["python3", "-u", "-m", "scripts.worker_diagnostics"]

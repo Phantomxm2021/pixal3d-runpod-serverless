@@ -26,6 +26,7 @@ from scripts.model_cache import (
 from scripts.worker_diagnostics import memory_stage
 
 PIXAL_DIR = Path("/app/Pixal3D")
+HOPPER_NATTEN_DIR = Path("/opt/natten-hopper")
 
 
 def _log(message: str) -> None:
@@ -60,6 +61,9 @@ _log("Checking CUDA availability")
 if not torch.cuda.is_available():
     raise RuntimeError("Pixal3D inference requires a CUDA-enabled GPU.")
 _autodetect_attn_backend()
+if torch.cuda.get_device_capability(0)[0] == 9 and HOPPER_NATTEN_DIR.is_dir():
+    sys.path.insert(0, str(HOPPER_NATTEN_DIR))
+    _log("Using the Hopper NATTEN wheel")
 sys.path.insert(0, str(PIXAL_DIR))
 
 _log("Importing o_voxel, FlexGEMM and model classes")
