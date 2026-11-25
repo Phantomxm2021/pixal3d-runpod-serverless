@@ -235,6 +235,7 @@ def handler(job: dict) -> dict:
                 "pipeline_type": options.pipeline["pipeline_type"],
                 "texture_size": options.postprocess["texture_size"],
                 "texture_format": options.texture_format,
+                "uv_backend": options.postprocess["uv_backend"],
                 **geometry,
                 "timing": {"fetch_seconds": fetch_seconds, **timing},
             }

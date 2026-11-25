@@ -126,6 +126,17 @@ RUN python3.10 -c "from huggingface_hub import hf_hub_download; \
     && echo '3eefd4abb2102f38f12b2d1992e5ff15e4923e5431c67dd494afe157e0111cd5  /opt/moge/model.pt' | sha256sum --check \
     && rm -rf /opt/moge/.cache
 
+# Import just the Torch UV atlas from Sprint3D, pinned with its licensing files.
+ARG SPRINT3D_UV_REF=1053b33b4564c7d28a9afe31b711ba660c210204
+RUN git init -q /tmp/sprint3d-uv \
+    && git -C /tmp/sprint3d-uv fetch --depth 1 https://github.com/AlayaLab/sprint3d.git "$SPRINT3D_UV_REF" \
+    && INSTALL_DIR="$(python3.10 -c 'import sysconfig; print(sysconfig.get_path("purelib"))')" \
+    && mkdir -p "$INSTALL_DIR" /usr/share/doc/sprint3d-uv \
+    && git -C /tmp/sprint3d-uv show FETCH_HEAD:src/sprint3d/mesh/uv_atlas.py > "$INSTALL_DIR/sprint3d_uv.py" \
+    && git -C /tmp/sprint3d-uv show FETCH_HEAD:LICENSE > /usr/share/doc/sprint3d-uv/LICENSE \
+    && git -C /tmp/sprint3d-uv show FETCH_HEAD:NOTICE > /usr/share/doc/sprint3d-uv/NOTICE \
+    && rm -rf /tmp/sprint3d-uv
+
 COPY rp_handler.py handler.py export_handler.py inference_worker.py /app/
 COPY scripts /app/scripts
 COPY patches/pixal3d-shared-dinov3.patch /tmp/pixal3d-shared-dinov3.patch
@@ -150,6 +161,7 @@ RUN git -C /app/Pixal3D apply /tmp/pixal3d-shared-dinov3.patch \
         from moge.model.v2 import MoGeModel; \
         from transformers import DINOv3ViTModel; \
         from pxr import UsdUtils; \
+        from sprint3d_uv import AtlasConfig, build_atlas, segment_charts; \
         from inspect import signature; from safetensors.torch import load_file; \
         assert 'backend' in signature(load_file).parameters; \
         missing = [name for name in ('o_voxel', 'flex_gemm', 'pixal3d') if find_spec(name) is None]; \

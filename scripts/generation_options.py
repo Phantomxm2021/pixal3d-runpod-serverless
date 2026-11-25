@@ -136,6 +136,14 @@ def generation_options(inputs: dict, *, asset_format: str) -> GenerationOptions:
         ("mesh_cluster_global_iterations", 1, 1, 8, True),
         ("mesh_cluster_smooth_strength", 1, 0, 10, False),
     )
+    custom_uv = any(name in inputs for name, *_ in uv_defaults)
+    default_uv_backend = "sprint3d" if asset_format == "glb" and not custom_uv else "legacy"
+    uv_backend = inputs.get("uv_backend", default_uv_backend)
+    if uv_backend not in ("sprint3d", "legacy"):
+        raise ValueError("input.uv_backend must be sprint3d or legacy.")
+    if uv_backend == "sprint3d" and custom_uv:
+        raise ValueError("input.mesh_cluster_* settings require uv_backend=legacy.")
+    postprocess["uv_backend"] = uv_backend
     postprocess.update({
         name: _number(inputs.get(name, default), f"input.{name}", lo, hi, integer=integer)
         for name, default, lo, hi, integer in uv_defaults

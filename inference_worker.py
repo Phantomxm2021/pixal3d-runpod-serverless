@@ -482,15 +482,26 @@ def run_inference(
     else:
         _log(f"Preparing GLB with {options.postprocess['decimation_target']} target triangles "
              f"and {options.postprocess['texture_size']}px textures")
+    _log(f"UV backend={options.postprocess['uv_backend']}, decoded triangles={len(mesh.faces)}")
+    prefix = "usdz" if as_usdz else "glb"
+    postprocess_started = time.monotonic()
+
+    def finish_postprocess_stage(name: str) -> None:
+        finish_stage(f"{prefix}_{name}")
+
     glb = o_voxel.postprocess.to_glb(
         vertices=mesh.vertices, faces=mesh.faces, attr_volume=mesh.attrs,
         coords=mesh.coords, attr_layout=PIPELINE.pbr_attr_layout,
         grid_size=grid_res,
         aabb=[[-0.5, -0.5, -0.5], [0.5, 0.5, 0.5]],
         quad_asset=quad_asset,
+        stage_finished=finish_postprocess_stage,
         **options.postprocess,
     )
-    finish_stage("usdz_postprocess" if quad_asset is not None else "glb_postprocess")
+    finish_postprocess_stage("material")
+    postprocess_seconds = round(time.monotonic() - postprocess_started, 2)
+    timings[f"{prefix}_postprocess_seconds"] = postprocess_seconds
+    _log(f"{prefix}_postprocess complete in {postprocess_seconds:.2f}s")
 
     rot = np.array([
         [-1,  0,  0, 0],

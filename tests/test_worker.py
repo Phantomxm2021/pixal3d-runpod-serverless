@@ -42,6 +42,7 @@ class RunpodWorkerTests(unittest.TestCase):
             self.assertTrue(skip_rembg)
             self.assertEqual(options.postprocess["decimation_target"], 200_000)
             self.assertEqual(options.postprocess["texture_size"], 2048)
+            self.assertEqual(options.postprocess["uv_backend"], "sprint3d")
             self.assertEqual(options.pipeline["pipeline_type"], "1024_cascade")
             output.write_bytes(b"glTF")
             return {"inference_seconds": 1}, {"triangle_count": 200, "vertex_count": 150}
@@ -56,6 +57,7 @@ class RunpodWorkerTests(unittest.TestCase):
         self.assertEqual(base64.b64decode(result["glb_base64"]), b"glTF")
         self.assertEqual(result["size_bytes"], 4)
         self.assertEqual(result["triangle_count"], 200)
+        self.assertEqual(result["uv_backend"], "sprint3d")
         self.assertEqual(result["vertex_count"], 150)
 
     def test_direct_glb_passes_requested_bake_options_to_inference(self):
@@ -191,6 +193,8 @@ class RunpodWorkerTests(unittest.TestCase):
             {"image_base64": "aW1hZ2U=", "shape_slat_sampler_params": {"steps": 0}},
             {"image_base64": "aW1hZ2U=", "camera_params": {"camera_angle_x": 0.2}},
             {"image_base64": "aW1hZ2U=", "remesh": False, "remesh_project": 0.5},
+            {"image_base64": "aW1hZ2U=", "uv_backend": "unknown"},
+            {"image_base64": "aW1hZ2U=", "uv_backend": "sprint3d", "mesh_cluster_refine_iterations": 1},
             {"image_base64": "aW1hZ2U=", "num_samples": 2, "output_format": "base64"},
             {"image_base64": "aW1hZ2U=", "asset_format": "usdz"},
             {"image_base64": "aW1hZ2U=", "asset_format": "usdz", "output_format": "base64"},

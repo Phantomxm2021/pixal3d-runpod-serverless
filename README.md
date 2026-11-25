@@ -95,6 +95,8 @@ MoGe-2 estimates the camera by default. Set `manual_fov` and optionally `fov_uni
 
 Direct GLB accepts `remesh` (default `true`). With remeshing enabled, `remesh_band` ranges from 0.25 to 4 (default 1), and `remesh_project` from 0 to 1 (default 0). GLB and USDZ both accept `mesh_cluster_threshold_cone_half_angle_rad` (0.01–π, default π/2), `mesh_cluster_refine_iterations` (0–8, default 0), `mesh_cluster_global_iterations` (1–8, default 1), `mesh_cluster_smooth_strength` (0–10, default 1), and `postprocess_verbose` (default `false`) for detailed post-process logs. USDZ keeps the source quads.
 
+`uv_backend` selects the UV atlas algorithm. Direct GLB defaults to `sprint3d`, which uses the pinned [Sprint3D Torch atlas](https://github.com/AlayaLab/sprint3d/blob/1053b33b4564c7d28a9afe31b711ba660c210204/src/sprint3d/mesh/uv_atlas.py). The worker uses the official Pixal3D model weights. `legacy` uses CuMesh and xatlas, and is selected automatically when supplying any `mesh_cluster_*` field. USDZ defaults to `legacy`; request `uv_backend: "sprint3d"` to try the GPU atlas while retaining native quads. GPU UVs can differ in seams and packing. The output returns the backend and separate timings for BVH, mesh preparation, UV, texture baking, material processing and encoding.
+
 ### Return large GLB files through S3
 
 Inline output supports GLBs up to 7 MB so the Base64 response fits both Runpod queue operations. The default `auto` uploads larger files when a bucket is configured. Request `url` to upload every GLB or `base64` to require inline delivery. Configure these environment variables on the endpoint for URL output.
