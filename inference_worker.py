@@ -8,8 +8,10 @@ import os
 import sys
 import tempfile
 import time
+from contextlib import ExitStack
 from pathlib import Path
 
+from scripts.global_models import stage_dinov3
 from scripts.model_cache import (
     DEFAULT_BIREFNET_MODEL,
     DINO_MODEL_NAME,
@@ -70,6 +72,7 @@ _log("Importing o_voxel, FlexGEMM and model classes")
 import numpy as np
 import o_voxel
 from PIL import Image
+from transformers import DINOv3ViTModel
 from moge.model.v2 import MoGeModel
 from pixal3d.pipelines import Pixal3DImageTo3DPipeline
 from pixal3d.trainers.flow_matching.mixins.image_conditioned_proj import (
@@ -132,19 +135,6 @@ def _load_pixal3d_pipeline() -> Pixal3DImageTo3DPipeline:
 
 def _prepare_pipeline(pipeline: Pixal3DImageTo3DPipeline) -> dict[str, float]:
     dino_path = str(GLOBAL_MODEL_ROOT / "dinov3") if GLOBAL_MODELS else DINO_MODEL_NAME
-    _log(f"Loading shared DINOv3 from {dino_path}")
-    started = time.monotonic()
-    dino_model = None
-    cond_models = []
-    for stage, config in IMAGE_COND_CONFIGS.items():
-        cond_model = DinoV3ProjFeatureExtractor(dino_path, dino_model=dino_model, **config)
-        cond_model.eval()
-        dino_model = cond_model.model
-        cond_models.append(cond_model)
-        setattr(pipeline, f"image_cond_model_{stage}", cond_model)
-    dino_seconds = round(time.monotonic() - started, 2)
-    _log(f"Shared DINOv3 and {len(cond_models)} projection modules ready in {dino_seconds:.2f}s")
-
     pipeline.low_vram = False
     _log("Transferring Pixal3D pipeline to CUDA")
     started = time.monotonic()
@@ -153,19 +143,56 @@ def _prepare_pipeline(pipeline: Pixal3DImageTo3DPipeline) -> dict[str, float]:
     pipeline_cuda_seconds = round(time.monotonic() - started, 2)
     _log(f"Pixal3D pipeline CUDA transfer complete in {pipeline_cuda_seconds:.2f}s")
 
-    _log("Transferring DINOv3 and projection modules to CUDA")
+    timings = {"pixal3d_pipeline_cuda_seconds": pipeline_cuda_seconds}
+    with ExitStack() as stack:
+        load_path = dino_path
+        if GLOBAL_MODELS:
+            _log("Copying DINOv3 weights from Global Volume to local scratch")
+            started = time.monotonic()
+            try:
+                load_path = str(stack.enter_context(
+                    stage_dinov3(Path(dino_path), Path(os.environ["XDG_CACHE_HOME"]))
+                ))
+            except OSError:
+                _log("Local DINOv3 staging failed, loading from Global Volume")
+            else:
+                timings["dinov3_local_stage_seconds"] = round(time.monotonic() - started, 2)
+                _log(f"DINOv3 local staging complete in {timings['dinov3_local_stage_seconds']:.2f}s")
+
+        _log(f"Loading shared DINOv3 from {load_path}")
+        started = time.monotonic()
+        dino_model = DINOv3ViTModel.from_pretrained(load_path)
+        timings["dinov3_load_seconds"] = round(time.monotonic() - started, 2)
+        _log(f"DINOv3 CPU load complete in {timings['dinov3_load_seconds']:.2f}s")
+
+        _log("Transferring shared DINOv3 to CUDA")
+        started = time.monotonic()
+        dino_model.cuda()
+        torch.cuda.synchronize()
+        timings["dinov3_cuda_seconds"] = round(time.monotonic() - started, 2)
+        _log(f"DINOv3 CUDA transfer complete in {timings['dinov3_cuda_seconds']:.2f}s")
+
+    started = time.monotonic()
+    cond_models = []
+    for stage, config in IMAGE_COND_CONFIGS.items():
+        cond_model = DinoV3ProjFeatureExtractor(dino_path, dino_model=dino_model, **config)
+        cond_model.eval()
+        cond_models.append(cond_model)
+        setattr(pipeline, f"image_cond_model_{stage}", cond_model)
+    projection_load_seconds = time.monotonic() - started
+    _log(f"Projection modules initialized in {projection_load_seconds:.2f}s")
+
     started = time.monotonic()
     for cond_model in cond_models:
-        cond_model.cuda()
+        cond_model.proj_grid.cuda()
     torch.cuda.synchronize()
-    dino_cuda_seconds = round(time.monotonic() - started, 2)
-    _log(f"DINOv3 and projection CUDA transfer complete in {dino_cuda_seconds:.2f}s")
+    projection_cuda_seconds = time.monotonic() - started
+    _log(f"Projection modules moved to CUDA in {projection_cuda_seconds:.2f}s")
 
-    timings = {
-        "dinov3_and_projection_load_seconds": dino_seconds,
-        "pixal3d_pipeline_cuda_seconds": pipeline_cuda_seconds,
-        "dinov3_and_projection_cuda_seconds": dino_cuda_seconds,
-    }
+    timings.update({
+        "dinov3_and_projection_load_seconds": round(timings["dinov3_load_seconds"] + projection_load_seconds, 2),
+        "dinov3_and_projection_cuda_seconds": round(timings["dinov3_cuda_seconds"] + projection_cuda_seconds, 2),
+    })
     naf_users = [cond_model for cond_model in cond_models if cond_model.use_naf_upsample]
     if naf_users:
         _log("Loading shared NAF for image conditioning")
@@ -289,7 +316,9 @@ def _estimate_camera(image: Image.Image, mesh_scale: float, extend_pixel: int, i
     return {"camera_angle_x": camera_angle_x, "distance": float(distance), "mesh_scale": mesh_scale}
 
 
-def run_inference(input_image: Path, output_glb: Path, *, seed: int, skip_rembg: bool) -> dict:
+def run_inference(
+    input_image: Path, output_glb: Path, *, seed: int, skip_rembg: bool,
+) -> tuple[dict[str, float], dict[str, int]]:
     t_start = time.monotonic()
     stage_start = t_start
     timings = {}
@@ -331,6 +360,9 @@ def run_inference(input_image: Path, output_glb: Path, *, seed: int, skip_rembg:
             stage_finished=finish_stage,
         )
     timings["generation_seconds"] = round(time.monotonic() - generation_start, 2)
+    timings["shape_upsample_seconds"] = round(
+        timings["shape_decoder_upsample_seconds"] + timings["shape_quantize_seconds"], 2
+    )
     mesh = mesh_list[0]
 
     _log("Exporting textured GLB")
@@ -354,4 +386,5 @@ def run_inference(input_image: Path, output_glb: Path, *, seed: int, skip_rembg:
 
     glb.export(str(output_glb), extension_webp=True)
     finish_stage("glb_encode")
-    return {"inference_seconds": round(time.monotonic() - t_start, 2), **timings}
+    geometry = {"triangle_count": len(glb.faces), "vertex_count": len(glb.vertices)}
+    return {"inference_seconds": round(time.monotonic() - t_start, 2), **timings}, geometry

@@ -8,11 +8,29 @@ from types import SimpleNamespace
 from unittest.mock import Mock, patch
 
 import handler
-from scripts.global_models import NAF_CHECKPOINT, _stream_file, verify_global_models
+from scripts.global_models import DINO_FILES, NAF_CHECKPOINT, _stream_file, stage_dinov3, verify_global_models
 from scripts.model_cache import configure_cache
 
 
 class GlobalModelTests(unittest.TestCase):
+    def test_dinov3_staging_copies_and_removes_files(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            source, scratch = root / "volume", root / "scratch"
+            source.mkdir()
+            scratch.mkdir()
+            for name in DINO_FILES:
+                (source / name).write_bytes(name.encode())
+            with stage_dinov3(source, scratch) as staged:
+                self.assertEqual(staged.parent, scratch)
+                for name in DINO_FILES:
+                    self.assertEqual((staged / name).read_bytes(), (source / name).read_bytes())
+            self.assertEqual(list(scratch.iterdir()), [])
+            (source / DINO_FILES[-1]).unlink()
+            with self.assertRaises(FileNotFoundError), stage_dinov3(source, scratch):
+                self.fail("A partial copy must not be used")
+            self.assertEqual(list(scratch.iterdir()), [])
+
     def test_writable_caches_are_local(self):
         with patch.dict(os.environ, {"PIXAL3D_GLOBAL_VOLUME": "1", "HF_HUB_CACHE": "/runpod-volume/hub"}, clear=True), \
              patch.object(Path, "mkdir"):

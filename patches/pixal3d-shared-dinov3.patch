@@ -1,5 +1,23 @@
+diff --git a/pixal3d/models/sc_vaes/sparse_unet_vae.py b/pixal3d/models/sc_vaes/sparse_unet_vae.py
+index b9902a1..1519f6d 100644
+--- a/pixal3d/models/sc_vaes/sparse_unet_vae.py
++++ b/pixal3d/models/sc_vaes/sparse_unet_vae.py
+@@ -517,6 +517,11 @@ class SparseUnetVaeDecoder(nn.Module):
+             for j, block in enumerate(res):
+                 if i < len(self.blocks) - 1 and j == len(res) - 1:
++                    if i + 1 == upsample_times and not self.training and type(block) is SparseResBlockC2S3d:
++                        # The next level only reads coordinates. Use the same subdivision
++                        # and spatial mapping without computing features that get discarded.
++                        subdivision = block.to_subdiv(h)
++                        mask = subdivision.replace(subdivision.feats > 0)
++                        return block.updown(mask, mask).coords
+                     h, sub = block(h)
+                 else:
+                     h = block(h)
+-       
+\ No newline at end of file
 diff --git a/pixal3d/pipelines/pixal3d_image_to_3d.py b/pixal3d/pipelines/pixal3d_image_to_3d.py
-index 7129482..24d446f 100644
+index 7129482..018abf6 100644
 --- a/pixal3d/pipelines/pixal3d_image_to_3d.py
 +++ b/pixal3d/pipelines/pixal3d_image_to_3d.py
 @@ -620,4 +620,6 @@ class Pixal3DImageTo3DPipeline(Pipeline):
@@ -29,21 +47,28 @@ index 7129482..24d446f 100644
 +            stage_finished("shape_low")
 
          # ---- Stage 3a: Upsample LR → HR ----
-@@ -726,4 +733,6 @@ class Pixal3DImageTo3DPipeline(Pipeline):
+@@ -708,4 +715,6 @@ class Pixal3DImageTo3DPipeline(Pipeline):
+             self.models['shape_slat_decoder'].cpu()
+             self.models['shape_slat_decoder'].low_vram = False
++        if stage_finished is not None:
++            stage_finished("shape_decoder_upsample")
+
+         lr_resolution = 512
+@@ -726,4 +735,6 @@ class Pixal3DImageTo3DPipeline(Pipeline):
          del lr_slat, hr_coords, quant_coords
          torch.cuda.empty_cache()
 +        if stage_finished is not None:
-+            stage_finished("shape_upsample")
++            stage_finished("shape_quantize")
 
          # ---- Stage 3b: Shape HR (proj) ----
-@@ -758,4 +767,6 @@ class Pixal3DImageTo3DPipeline(Pipeline):
+@@ -758,4 +769,6 @@ class Pixal3DImageTo3DPipeline(Pipeline):
          del cond_shape_hr, noise_hr, hr_slat, hr_coords_unique
          torch.cuda.empty_cache()
 +        if stage_finished is not None:
 +            stage_finished("shape_high")
 
          # ---- Stage 4: Texture (proj) ----
-@@ -774,8 +785,12 @@ class Pixal3DImageTo3DPipeline(Pipeline):
+@@ -774,8 +787,12 @@ class Pixal3DImageTo3DPipeline(Pipeline):
          del cond_tex
          torch.cuda.empty_cache()
 +        if stage_finished is not None:

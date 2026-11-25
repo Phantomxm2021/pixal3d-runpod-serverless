@@ -36,7 +36,7 @@ Set `PIXAL3D_MODEL_REVISION` to the full Hugging Face commit SHA shown in the en
 
 Compare the job's `delayTime` in milliseconds with `output.timing.model_load_seconds` on the first job that loads the models. The load time includes the Pixal3D pipeline, auxiliary models, and transfer to the GPU. `pixal3d_pipeline_load_seconds` measures the initial pipeline load before that transfer.
 
-The conditioning stages share one DINOv3 instance and one NAF instance. Each request reuses DINOv3 features for stages with the same image resolution. The cold job reports worker import time, model loading and CUDA transfers, and the MoGe-2 checkpoint read, CPU initialization, and state-dict load. All generation jobs report preprocessing, camera estimation, sampling and decoding, GLB post-processing and encoding, and delivery time.
+The conditioning stages share one DINOv3 instance and one NAF instance. With a Global Volume, the worker stages DINOv3 on local scratch for loading. Each request reuses DINOv3 features for stages with the same image resolution. The cold job reports worker import time, model loading and CUDA transfers, and the MoGe-2 checkpoint read, CPU initialization, and state-dict load. All generation jobs report preprocessing, camera estimation, sampling, shape upsampling and quantization, decoding, GLB post-processing and encoding, and delivery time.
 
 During MoGe-2 startup, the container logs process RSS and its high-water mark along with available cgroup usage, peak, limit, and OOM counters. An observer reports the inference process exit status and counter changes if it survives the exit.
 
@@ -71,7 +71,7 @@ curl -fsS "https://api.runpod.ai/v2/$RUNPOD_ENDPOINT_ID/status/$JOB_ID" \
 | `skip_rembg` | Boolean. Defaults to `false`. Set `true` for images that are already prepared as clean RGB inputs. |
 | `output_format` | `auto` (default), `base64`, or `url`. |
 
-The response includes `filename`, `mime_type`, `size_bytes`, `timing`, and either `glb_base64` or `glb_url`. Invalid inputs and inference errors surface as a Runpod job error. Inference exception details are available in the worker logs.
+The response includes `filename`, `mime_type`, `size_bytes`, the exported mesh's `triangle_count` and `vertex_count`, `timing`, and either `glb_base64` or `glb_url`. Invalid inputs and inference errors surface as a Runpod job error. Inference exception details are available in the worker logs.
 
 ### Return large GLB files through S3
 

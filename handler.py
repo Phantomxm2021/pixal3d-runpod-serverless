@@ -67,7 +67,9 @@ def _upload_glb(path: Path, bucket: str) -> str:
     )
 
 
-def _run_inference(input_path: Path, output_path: Path, *, seed: int, skip_rembg: bool) -> dict:
+def _run_inference(
+    input_path: Path, output_path: Path, *, seed: int, skip_rembg: bool,
+) -> tuple[dict[str, float], dict[str, int]]:
     print("[request] Importing inference worker", flush=True)
     cold = "inference_worker" not in sys.modules
     started = time.monotonic()
@@ -75,10 +77,10 @@ def _run_inference(input_path: Path, output_path: Path, *, seed: int, skip_rembg
 
     worker_ready_seconds = round(time.monotonic() - started, 2)
     print(f"[request] Inference worker ready in {worker_ready_seconds:.2f}s, starting inference", flush=True)
-    timing = run_inference(input_path, output_path, seed=seed, skip_rembg=skip_rembg)
+    timing, geometry = run_inference(input_path, output_path, seed=seed, skip_rembg=skip_rembg)
     if cold:
-        return {"worker_ready_seconds": worker_ready_seconds, **MODEL_LOAD_TIMINGS, **timing}
-    return timing
+        timing = {"worker_ready_seconds": worker_ready_seconds, **MODEL_LOAD_TIMINGS, **timing}
+    return timing, geometry
 
 
 def handler(job: dict) -> dict:
@@ -168,7 +170,7 @@ def handler(job: dict) -> dict:
         print(f"[request] Input image ready after {fetch_seconds:.2f}s", flush=True)
 
         try:
-            timing = _run_inference(input_path, output_path, seed=seed, skip_rembg=skip_rembg)
+            timing, geometry = _run_inference(input_path, output_path, seed=seed, skip_rembg=skip_rembg)
             size = output_path.stat().st_size if output_path.is_file() else 0
         except Exception:
             LOGGER.exception("Pixal3D inference failed")
@@ -184,6 +186,7 @@ def handler(job: dict) -> dict:
             "filename": output_path.name,
             "mime_type": GLB_MIME_TYPE,
             "size_bytes": size,
+            **geometry,
             "timing": {"fetch_seconds": fetch_seconds, **timing},
         }
         started = time.monotonic()

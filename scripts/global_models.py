@@ -3,6 +3,10 @@
 from __future__ import annotations
 
 import json
+import shutil
+import tempfile
+from collections.abc import Iterator
+from contextlib import contextmanager
 from pathlib import Path
 
 from scripts.model_cache import (
@@ -20,6 +24,16 @@ from scripts.model_cache import (
 
 DINO_FILES = ("config.json", "model.safetensors", "preprocessor_config.json")
 MANIFEST = "manifest.json"
+
+
+@contextmanager
+def stage_dinov3(source: Path, scratch: Path) -> Iterator[Path]:
+    """Keep network-backed reads out of the model's mmap and CUDA copy."""
+    with tempfile.TemporaryDirectory(prefix="dinov3-", dir=scratch) as directory:
+        staged = Path(directory)
+        for name in DINO_FILES:
+            shutil.copyfile(source / name, staged / name)
+        yield staged
 
 
 def verify_global_models(root: Path, *, include_pipeline: bool = True) -> dict[str, int]:

@@ -41,7 +41,7 @@ class RunpodWorkerTests(unittest.TestCase):
             self.assertEqual(seed, 5)
             self.assertTrue(skip_rembg)
             output.write_bytes(b"glTF")
-            return {"inference_seconds": 1}
+            return {"inference_seconds": 1}, {"triangle_count": 200, "vertex_count": 150}
 
         with patch.object(worker, "_run_inference", side_effect=infer):
             result = worker.handler({"input": {
@@ -52,12 +52,14 @@ class RunpodWorkerTests(unittest.TestCase):
             }})
         self.assertEqual(base64.b64decode(result["glb_base64"]), b"glTF")
         self.assertEqual(result["size_bytes"], 4)
+        self.assertEqual(result["triangle_count"], 200)
+        self.assertEqual(result["vertex_count"], 150)
 
     def test_oversized_glb_can_be_uploaded(self):
         def infer(source, output, **kwargs):
             self.assertEqual(source.read_bytes(), b"source")
             output.write_bytes(b"large glb")
-            return {"inference_seconds": 1}
+            return {"inference_seconds": 1}, {"triangle_count": 200, "vertex_count": 150}
 
         download = Mock(side_effect=lambda *args, **kwargs: io.BytesIO(b"source"))
         upload = Mock(return_value="https://storage.example/model.glb")
@@ -82,11 +84,12 @@ class RunpodWorkerTests(unittest.TestCase):
         self.assertEqual(upload.call_args.args[1], "results")
         self.assertFalse(upload.call_args.args[0].exists())
         self.assertEqual(result["glb_url"], upload.return_value)
+        self.assertEqual(result["triangle_count"], 200)
 
     def test_auto_keeps_small_glb_inline_when_bucket_is_configured(self):
         def infer(source, output, **kwargs):
             output.write_bytes(b"glTF")
-            return {}
+            return {}, {"triangle_count": 10, "vertex_count": 6}
 
         with patch.object(worker, "_run_inference", side_effect=infer), \
              patch.object(worker, "_upload_glb") as upload, \
