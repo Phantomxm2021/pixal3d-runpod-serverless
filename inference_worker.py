@@ -419,6 +419,14 @@ def run_job_sample(input_image: Path, output_path: Path, *, seed: int, skip_remb
         raise
 
 
+GLB_ROTATION = np.array([
+    [-1,  0,  0, 0],
+    [ 0,  0, -1, 0],
+    [ 0, -1,  0, 0],
+    [ 0,  0,  0, 1],
+], dtype=np.float64)
+
+
 def run_inference(
     input_image: Path, output_path: Path, *, seed: int, skip_rembg: bool,
     options: GenerationOptions,
@@ -450,7 +458,7 @@ def run_inference(
     camera_params = _camera_for_image(image_for_pipeline, **options.camera)
     finish_stage("camera")
 
-    _log("Running Pixal3D mesh and texture generation")
+    _log("Running Pixal3D white mesh generation" if options.white_mesh else "Running Pixal3D mesh and texture generation")
     generation_start = time.monotonic()
     as_usdz = output_path.suffix == ".usdz"
     torch.manual_seed(seed)
@@ -463,13 +471,32 @@ def run_inference(
             return_latent=True,
             stage_finished=finish_stage,
             retain_quads=as_usdz,
+            geometry_only=options.white_mesh,
             **options.pipeline,
         )
     timings["generation_seconds"] = round(time.monotonic() - generation_start, 2)
-    timings["shape_upsample_seconds"] = round(
-        timings["shape_decoder_upsample_seconds"] + timings["shape_quantize_seconds"], 2
-    )
+    if "shape_decoder_upsample_seconds" in timings:
+        timings["shape_upsample_seconds"] = round(
+            timings["shape_decoder_upsample_seconds"] + timings["shape_quantize_seconds"], 2
+        )
     mesh = mesh_list[0]
+
+    if options.white_mesh:
+        import trimesh
+
+        target = options.postprocess["decimation_target"]
+        if len(mesh.faces) > target:
+            mesh.simplify(target)
+        finish_stage("white_mesh_simplify")
+        if not len(mesh.faces):
+            raise RuntimeError("Pixal3D decoded an empty white mesh.")
+        glb = trimesh.Trimesh(vertices=mesh.vertices.cpu().numpy(), faces=mesh.faces.cpu().numpy(), process=False)
+        glb.apply_transform(GLB_ROTATION)
+        glb.export(str(output_path))
+        finish_stage("glb_encode")
+        return {"inference_seconds": round(time.monotonic() - t_start, 2), **timings}, {
+            "mesh_resolution": grid_res, "triangle_count": len(glb.faces), "vertex_count": len(glb.vertices),
+        }
 
     quad_asset = None
     if as_usdz:
@@ -503,13 +530,7 @@ def run_inference(
     timings[f"{prefix}_postprocess_seconds"] = postprocess_seconds
     _log(f"{prefix}_postprocess complete in {postprocess_seconds:.2f}s")
 
-    rot = np.array([
-        [-1,  0,  0, 0],
-        [ 0,  0, -1, 0],
-        [ 0, -1,  0, 0],
-        [ 0,  0,  0, 1],
-    ], dtype=np.float64)
-    glb.apply_transform(rot)
+    glb.apply_transform(GLB_ROTATION)
 
     if quad_asset is not None:
         geometry = quad_asset.export(glb, output_path)

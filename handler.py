@@ -58,6 +58,14 @@ def _upload_glb(path: Path, bucket: str) -> str:
     return download_url(client, bucket, key)
 
 
+def _upload_white_mesh(path: Path, bucket: str) -> dict:
+    client = storage_client()
+    asset_id = uuid.uuid4().hex
+    key = f"pixal3d/white-mesh/{asset_id}.glb"
+    client.upload_file(str(path), bucket, key, ExtraArgs={"ContentType": GLB_MIME_TYPE})
+    return {"asset_id": asset_id, "glb_url": download_url(client, bucket, key)}
+
+
 def _upload_usdz(path: Path, bucket: str) -> dict:
     client = storage_client()
     asset_id = uuid.uuid4().hex
@@ -91,6 +99,8 @@ def _deliver_asset(path: Path, result: dict, output_format: str, bucket: str | N
         try:
             if asset_format == "USDZ":
                 result.update(_upload_usdz(path, bucket))
+            elif result.get("asset_type") == "white_mesh":
+                result.update(_upload_white_mesh(path, bucket))
             else:
                 result["glb_url"] = _upload_glb(path, bucket)
         except Exception:
@@ -143,6 +153,7 @@ def handler(job: dict) -> dict:
 
         return export_glb(inputs)
 
+    white_mesh = inputs.get("action") == "generate_white_mesh"
     image_url = inputs.get("image_url")
     image_base64 = inputs.get("image_base64")
     if not image_url and not image_base64:
@@ -180,13 +191,15 @@ def handler(job: dict) -> dict:
     asset_format = inputs.get("asset_format", "glb")
     if asset_format not in ("glb", "usdz"):
         return {"error": "input.asset_format must be glb or usdz."}
+    if white_mesh and asset_format != "glb":
+        return {"error": "White mesh generation requires input.asset_format=glb."}
     if asset_format == "usdz" and output_format == "base64":
         return {"error": "USDZ source assets require URL output."}
     if (asset_format == "usdz" or output_format == "url") and not bucket:
         return {"error": "Set PIXAL3D_OUTPUT_BUCKET on the endpoint to use URL output."}
 
     try:
-        options = generation_options(inputs, asset_format=asset_format)
+        options = generation_options(inputs, asset_format=asset_format, white_mesh=white_mesh)
     except ValueError as exc:
         return {"error": str(exc)}
     if options.num_samples > 1:
@@ -233,12 +246,17 @@ def handler(job: dict) -> dict:
                 "size_bytes": size,
                 "seed": sample_seed,
                 "pipeline_type": options.pipeline["pipeline_type"],
-                "texture_size": options.postprocess["texture_size"],
-                "texture_format": options.texture_format,
-                "uv_backend": options.postprocess["uv_backend"],
                 **geometry,
                 "timing": {"fetch_seconds": fetch_seconds, **timing},
             }
+            if white_mesh:
+                result["asset_type"] = "white_mesh"
+            else:
+                result.update(
+                    texture_size=options.postprocess["texture_size"],
+                    texture_format=options.texture_format,
+                    uv_backend=options.postprocess["uv_backend"],
+                )
             if asset_format == "glb":
                 result["target_triangles"] = options.postprocess["decimation_target"]
             generated.append((output_path, result))

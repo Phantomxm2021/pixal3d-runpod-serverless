@@ -5,10 +5,14 @@ DEFAULT_TEXTURE_SIZE = 2048
 
 
 def glb_options(inputs: dict, *, default_triangles: int, max_triangles: int = 200_000) -> tuple[int, int]:
+    return triangle_budget(inputs, default_triangles=default_triangles, max_triangles=max_triangles), texture_size(inputs)
+
+
+def triangle_budget(inputs: dict, *, default_triangles: int, max_triangles: int) -> int:
     target_triangles = inputs.get("target_triangles", default_triangles)
     if type(target_triangles) is not int or not 1_000 <= target_triangles <= max_triangles:
         raise ValueError(f"input.target_triangles must be an integer between 1000 and {max_triangles}.")
-    return target_triangles, texture_size(inputs)
+    return target_triangles
 
 
 def texture_size(inputs: dict) -> int:

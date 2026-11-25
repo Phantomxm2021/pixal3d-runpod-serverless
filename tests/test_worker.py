@@ -97,6 +97,40 @@ class RunpodWorkerTests(unittest.TestCase):
         self.assertEqual(result["texture_size"], 1024)
         self.assertEqual(result["mesh_resolution"], 1280)
 
+    def test_white_mesh_publishes_reusable_untextured_glb(self):
+        def infer(source, output, *, seed, skip_rembg, options):
+            self.assertTrue(options.white_mesh)
+            self.assertEqual(options.pipeline["pipeline_type"], "512")
+            self.assertEqual(options.postprocess["decimation_target"], 30_000)
+            output.write_bytes(b"glTF")
+            return {"shape_decode_seconds": 1}, {"triangle_count": 29_998, "mesh_resolution": 512}
+
+        client = Mock()
+        client.generate_presigned_url.return_value = "https://example.com/white.glb"
+        with patch.object(worker, "_run_inference", side_effect=infer), \
+             patch.object(worker, "storage_client", return_value=client), \
+             patch.dict(os.environ, {"PIXAL3D_OUTPUT_BUCKET": "assets"}):
+            result = worker.handler({"input": {
+                "action": "generate_white_mesh", "image_base64": "aW1hZ2U=",
+                "target_triangles": 30_000, "output_format": "url",
+            }})
+
+        self.assertEqual(result["asset_type"], "white_mesh")
+        self.assertEqual(result["glb_url"], "https://example.com/white.glb")
+        self.assertEqual(result["triangle_count"], 29_998)
+        self.assertEqual(result["timing"]["shape_decode_seconds"], 1)
+        self.assertNotIn("texture_size", result)
+        key = f"pixal3d/white-mesh/{result['asset_id']}.glb"
+        self.assertEqual(client.upload_file.call_args.args[1:], ("assets", key))
+
+    def test_white_mesh_rejects_texture_options_before_loading_models(self):
+        with patch.object(worker, "_run_inference") as infer:
+            result = worker.handler({"input": {
+                "action": "generate_white_mesh", "image_base64": "aW1hZ2U=", "texture_size": 2048,
+            }})
+        self.assertIn("error", result)
+        infer.assert_not_called()
+
     def test_multiple_samples_use_distinct_seeds_and_publish_urls(self):
         def infer(source, output, **kwargs):
             self.assertEqual(source.read_bytes(), b"image")

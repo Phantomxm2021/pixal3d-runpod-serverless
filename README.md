@@ -97,6 +97,16 @@ Direct GLB accepts `remesh` (default `true`). With remeshing enabled, `remesh_ba
 
 `uv_backend` selects the UV atlas algorithm. Direct GLB defaults to `sprint3d`, which uses the pinned [Sprint3D Torch atlas](https://github.com/AlayaLab/sprint3d/blob/1053b33b4564c7d28a9afe31b711ba660c210204/src/sprint3d/mesh/uv_atlas.py). The worker uses the official Pixal3D model weights. `legacy` uses CuMesh and xatlas, and is selected automatically when supplying any `mesh_cluster_*` field. USDZ defaults to `legacy`; request `uv_backend: "sprint3d"` to try the GPU atlas while retaining native quads. GPU UVs can differ in seams and packing. The output returns the backend and separate timings for BVH, mesh preparation, UV, texture baking, material processing and encoding.
 
+### Generate a white mesh
+
+Use `action: "generate_white_mesh"` to return an untextured GLB for a separate geometry refinement or texturing stage. Resolution `512` is the default and stops after the first shape stage. Use `1024` or `1536` to run the shape cascade before decoding.
+
+```json
+{"input":{"action":"generate_white_mesh","image_url":"https://example.com/object.png","resolution":512,"target_triangles":30000,"output_format":"url"}}
+```
+
+The response includes `asset_type: "white_mesh"`, the actual triangle count, and shape decoding, simplification and GLB export timings. Use URL output to store the mesh in the configured private bucket and receive its `asset_id` and `glb_url`. The route skips texture sampling, UV unwrapping and baking. A separate texturing stage must generate UVs.
+
 ### Return large GLB files through S3
 
 Inline output supports GLBs up to 7 MB so the Base64 response fits both Runpod queue operations. The default `auto` uploads larger files when a bucket is configured. Request `url` to upload every GLB or `base64` to require inline delivery. Configure these environment variables on the endpoint for URL output.

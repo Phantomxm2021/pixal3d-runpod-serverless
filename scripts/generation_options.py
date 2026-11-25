@@ -3,7 +3,7 @@
 from dataclasses import dataclass
 from math import pi, radians
 
-from scripts.mesh_options import DEFAULT_GENERATION_TRIANGLES, glb_options, texture_size
+from scripts.mesh_options import DEFAULT_GENERATION_TRIANGLES, glb_options, texture_size, triangle_budget
 
 SAMPLERS = ("sparse_structure_sampler_params", "shape_slat_sampler_params", "tex_slat_sampler_params")
 SAMPLER_NUMBERS = {
@@ -91,25 +91,44 @@ class GenerationOptions:
     texture_format: str
     low_vram: bool
     num_samples: int
+    white_mesh: bool = False
 
 
-def generation_options(inputs: dict, *, asset_format: str) -> GenerationOptions:
+def generation_options(inputs: dict, *, asset_format: str, white_mesh: bool = False) -> GenerationOptions:
+    pipeline_types = {512: "512", **CASCADE_TYPES} if white_mesh else CASCADE_TYPES
+    choices = "512, 1024 or 1536" if white_mesh else "1024 or 1536"
     resolution = inputs.get("resolution")
-    pipeline_type = inputs.get("pipeline_type", "1024_cascade")
-    if pipeline_type not in CASCADE_TYPES.values():
-        raise ValueError("input.pipeline_type must be 1024_cascade or 1536_cascade.")
+    pipeline_type = inputs.get("pipeline_type", "512" if white_mesh else "1024_cascade")
+    if pipeline_type not in pipeline_types.values():
+        choices_text = "512, 1024_cascade or 1536_cascade" if white_mesh else "1024_cascade or 1536_cascade"
+        raise ValueError(f"input.pipeline_type must be {choices_text}.")
     if "resolution" in inputs:
-        if type(resolution) is not int or resolution not in CASCADE_TYPES:
-            raise ValueError("input.resolution must be 1024 or 1536.")
-        if "pipeline_type" in inputs and pipeline_type != CASCADE_TYPES[resolution]:
-            raise ValueError("input.resolution and input.pipeline_type must specify the same cascade.")
-        pipeline_type = CASCADE_TYPES[resolution]
+        if type(resolution) is not int or resolution not in pipeline_types:
+            raise ValueError(f"input.resolution must be {choices}.")
+        if "pipeline_type" in inputs and pipeline_type != pipeline_types[resolution]:
+            description = "resolution" if white_mesh else "cascade"
+            raise ValueError(f"input.resolution and input.pipeline_type must specify the same {description}.")
+        pipeline_type = pipeline_types[resolution]
     pipeline = {
         "pipeline_type": pipeline_type,
         # Upstream uses this as a fallback threshold while above 1024.
         "max_num_tokens": _number(inputs.get("max_num_tokens", 49152), "input.max_num_tokens", 1, 65536, integer=True),
         **{name: _sampler_options(inputs.get(name, {}), f"input.{name}") for name in SAMPLERS},
     }
+    low_vram = _boolean(inputs, "low_vram", False)
+    num_samples = _number(inputs.get("num_samples", 1), "input.num_samples", 1, 4, integer=True)
+    if white_mesh:
+        textured_options = (
+            "texture_size", "texture_format", "tex_slat_sampler_params", "uv_backend",
+            "remesh", "remesh_band", "remesh_project", "postprocess_verbose",
+        )
+        if any(name in inputs for name in textured_options) or any(name.startswith("mesh_cluster_") for name in inputs):
+            raise ValueError("White mesh generation supports triangle budgets and exports geometry without UVs or materials.")
+        target = triangle_budget(inputs, default_triangles=DEFAULT_GENERATION_TRIANGLES, max_triangles=1_000_000)
+        return GenerationOptions(
+            pipeline, _camera_options(inputs), {"decimation_target": target}, "", low_vram, num_samples, white_mesh=True,
+        )
+
     texture_format = inputs.get("texture_format", "webp" if asset_format == "glb" else "png")
     if asset_format == "glb":
         if texture_format not in ("webp", "png"):
@@ -149,8 +168,4 @@ def generation_options(inputs: dict, *, asset_format: str) -> GenerationOptions:
         for name, default, lo, hi, integer in uv_defaults
     })
     postprocess["verbose"] = _boolean(inputs, "postprocess_verbose", False)
-    return GenerationOptions(
-        pipeline, _camera_options(inputs), postprocess, texture_format,
-        _boolean(inputs, "low_vram", False),
-        _number(inputs.get("num_samples", 1), "input.num_samples", 1, 4, integer=True),
-    )
+    return GenerationOptions(pipeline, _camera_options(inputs), postprocess, texture_format, low_vram, num_samples)

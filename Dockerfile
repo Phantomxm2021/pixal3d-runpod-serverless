@@ -143,6 +143,7 @@ COPY patches/pixal3d-shared-dinov3.patch /tmp/pixal3d-shared-dinov3.patch
 COPY patches/pixal3d-profile-weights.patch /tmp/pixal3d-profile-weights.patch
 COPY patches/pixal3d-cascade-options.patch /tmp/pixal3d-cascade-options.patch
 COPY patches/ovoxel-quad-bake.patch /tmp/ovoxel-quad-bake.patch
+COPY patches/pixal3d-white-mesh.patch /tmp/pixal3d-white-mesh.patch
 
 RUN python3.10 -m pip install 'usd-core==25.11' 'safetensors==0.8.0'
 
@@ -154,7 +155,8 @@ RUN git -C /app/Pixal3D apply /tmp/pixal3d-shared-dinov3.patch \
     && git -C /app/Pixal3D apply /tmp/pixal3d-cascade-options.patch \
     && OVOXEL_PARENT="$(python3.10 -c 'from importlib.util import find_spec; from pathlib import Path; print(Path(find_spec("o_voxel").origin).parent.parent)')" \
     && git -C "$OVOXEL_PARENT" apply /tmp/ovoxel-quad-bake.patch \
-    && rm /tmp/pixal3d-shared-dinov3.patch /tmp/pixal3d-profile-weights.patch /tmp/pixal3d-cascade-options.patch /tmp/ovoxel-quad-bake.patch \
+    && git -C /app/Pixal3D apply /tmp/pixal3d-white-mesh.patch \
+    && rm /tmp/pixal3d-shared-dinov3.patch /tmp/pixal3d-profile-weights.patch /tmp/pixal3d-cascade-options.patch /tmp/ovoxel-quad-bake.patch /tmp/pixal3d-white-mesh.patch \
     && python3.10 -m pip check \
     && PYTHONPATH=/app/Pixal3D python3.10 -c "from importlib.util import find_spec; \
         import torch, runpod, boto3, flash_attn, flash_attn_interface, natten; \
