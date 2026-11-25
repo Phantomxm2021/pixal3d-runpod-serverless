@@ -107,6 +107,37 @@ Use `action: "generate_white_mesh"` to return an untextured GLB for a separate g
 
 The response includes `asset_type: "white_mesh"`, the actual triangle count, and shape decoding, simplification and GLB export timings. Use URL output to store the mesh in the configured private bucket and receive its `asset_id` and `glb_url`. The route skips texture sampling, UV unwrapping and baking. A separate texturing stage must generate UVs.
 
+### Refine a saved white mesh
+
+The same endpoint runs Hi3D v1.0 in a separate Python environment. The worker loads it only for refinement and releases any resident Pixal3D models first.
+
+Prepare the Hi3D weights and the DINOv2 and CLIP encoders on the attached Global Volume once. This command uses a worker to download the pinned files and returns `status: "ready"` after verifying them.
+
+```json
+{"input":{"action":"prepare_hi3d_cache"},"policy":{"executionTimeout":1800000,"ttl":1800000}}
+```
+
+Send the original image and the `asset_id` from a white mesh saved with URL output.
+
+```json
+{"input":{"action":"refine_white_mesh","asset_id":"<white-mesh-asset-id>","image_url":"https://example.com/object.png","resolution":512,"output_format":"url"}}
+```
+
+| Field | Value |
+|---|---|
+| `asset_id` | Required. The ID of the source white mesh in the output bucket. |
+| `image_url` or `image_base64` | Required. Use the reference image for the source white mesh. |
+| `resolution` | `512` (default, one refinement pass) or `1024` (two passes). |
+| `num_inference_steps` | Scheduler updates per pass, integer from 1 to 50. Defaults to 25. |
+| `seed` | Defaults to 42. |
+| `skip_rembg` | Defaults to false. The worker removes the background of opaque images and uses existing alpha masks. |
+| `target_triangles` | Optional simplification target from 1,000 to 1,000,000. |
+| `output_format` | `url` (default). |
+
+The result includes a new `asset_id`, `source_asset_id`, a signed `glb_url`, actual geometry counts, stage timings, and peak PyTorch VRAM and process memory counters. The refined GLB uses the source bounding box's center and longest dimension and can be reused for later texturing.
+
+[Powered by Hi3D 1.0](https://hi3d.ai/). The Hi3D code and weights use the [Hi3D Open License Agreement](https://github.com/hi3d-official/Hi3Dv1.0/blob/v1.0/LICENSE).
+
 ### Return large GLB files through S3
 
 Inline output supports GLBs up to 7 MB so the Base64 response fits both Runpod queue operations. The default `auto` uploads larger files when a bucket is configured. Request `url` to upload every GLB or `base64` to require inline delivery. Configure these environment variables on the endpoint for URL output.

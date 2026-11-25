@@ -35,6 +35,37 @@ RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates
     && tar --extract --xz --file=/tmp/blender.tar.xz --directory=/opt/blender --strip-components=1 \
     && rm /tmp/blender.tar.xz
 
+FROM nvidia/cuda:12.4.1-runtime-ubuntu22.04 AS hi3d-runtime
+
+ENV DEBIAN_FRONTEND=noninteractive \
+    PIP_NO_CACHE_DIR=1 \
+    PIP_DISABLE_PIP_VERSION_CHECK=1
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        ca-certificates curl git python3.10 python3.10-venv libgomp1 \
+    && rm -rf /var/lib/apt/lists/* \
+    && python3.10 -m venv /opt/hi3d-runtime
+
+ARG HI3D_REF=23dcc684bc6e1fab86ecafb99ec5270edad122f9
+RUN git init -q /tmp/Hi3D \
+    && git -C /tmp/Hi3D fetch --depth 1 https://github.com/hi3d-official/Hi3Dv1.0.git "$HI3D_REF" \
+    && git -C /tmp/Hi3D checkout --detach FETCH_HEAD
+
+# Keep Hi3D's official Torch 2.5 stack separate from the Pixal3D worker's Torch 2.6.
+RUN PIP_CONSTRAINT=/tmp/Hi3D/docker/constraints.txt /opt/hi3d-runtime/bin/python -m pip install \
+        --extra-index-url https://download.pytorch.org/whl/cu124 \
+        'torch==2.5.0+cu124' 'torchvision==0.20.0+cu124' \
+    && PIP_CONSTRAINT=/tmp/Hi3D/docker/constraints.txt /opt/hi3d-runtime/bin/python -m pip install \
+        '/tmp/Hi3D[inference,demo]' 'rembg==2.0.62' 'onnxruntime==1.20.1' 'opencv-python-headless<4.12' \
+        'https://github.com/Dao-AILab/flash-attention/releases/download/v2.7.4.post1/flash_attn-2.7.4.post1%2Bcu12torch2.5cxx11abiFALSE-cp310-cp310-linux_x86_64.whl' \
+    && /opt/hi3d-runtime/bin/python -m pip check \
+    && /opt/hi3d-runtime/bin/python -c 'import torch, flash_attn, onnxruntime, spconv.pytorch; from sparc3d import Sparc3DPipeline; assert torch.version.cuda == "12.4"'
+
+RUN mkdir /opt/hi3d-rembg \
+    && curl --fail --location --silent --show-error --retry 3 \
+        'https://github.com/danielgatis/rembg/releases/download/v0.0.0/u2net.onnx' -o /opt/hi3d-rembg/u2net.onnx \
+    && echo '60024c5c889badc19c04ad937298a77b  /opt/hi3d-rembg/u2net.onnx' | md5sum --check
+
 FROM nvidia/cuda:12.4.1-runtime-ubuntu22.04
 
 ENV DEBIAN_FRONTEND=noninteractive \
@@ -137,7 +168,9 @@ RUN git init -q /tmp/sprint3d-uv \
     && git -C /tmp/sprint3d-uv show FETCH_HEAD:NOTICE > /usr/share/doc/sprint3d-uv/NOTICE \
     && rm -rf /tmp/sprint3d-uv
 
-COPY rp_handler.py handler.py export_handler.py inference_worker.py /app/
+COPY --from=hi3d-runtime /opt/hi3d-runtime /opt/hi3d-runtime
+COPY --from=hi3d-runtime /opt/hi3d-rembg /opt/hi3d-rembg
+COPY rp_handler.py handler.py export_handler.py hi3d_handler.py inference_worker.py /app/
 COPY scripts /app/scripts
 COPY patches/pixal3d-shared-dinov3.patch /tmp/pixal3d-shared-dinov3.patch
 COPY patches/pixal3d-profile-weights.patch /tmp/pixal3d-profile-weights.patch

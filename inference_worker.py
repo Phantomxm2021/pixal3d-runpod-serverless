@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import gc
 import json
 import math
 import os
@@ -328,6 +329,17 @@ def prepare_models(*, low_vram: bool = False) -> bool:
     })
     _log(f"Model load complete in {MODEL_LOAD_TIMINGS['model_load_seconds']:.2f}s")
     return True
+
+
+def release_models() -> None:
+    """Free Pixal3D weights before an isolated refinement process uses the GPU."""
+    global PIPELINE, MOGE_MODEL
+    if PIPELINE is not None:
+        PIPELINE = MOGE_MODEL = None
+        MODEL_LOAD_TIMINGS.clear()
+        gc.collect()
+        torch.cuda.empty_cache()
+        _log("Released Pixal3D models for Hi3D")
 
 
 # ---------------------------------------------------------------------------

@@ -11,7 +11,7 @@ import subprocess
 import tempfile
 import time
 
-from scripts.asset_storage import GLB_MIME_TYPE, asset_source_key, download_url, storage_client
+from scripts.asset_storage import GLB_MIME_TYPE, asset_source_key, download_url, s3_error_code, storage_client
 from scripts.mesh_options import glb_options
 from scripts.mesh_stats import glb_stats
 
@@ -20,10 +20,6 @@ EXPORT_SCRIPT = Path(__file__).resolve().parent / "scripts" / "blender_export.py
 EXPORT_VERSION = "blender-5.2.1-v1"
 MAX_SOURCE_BYTES = 250_000_000
 MISSING_OBJECT = {"404", "NoSuchKey", "NotFound"}
-
-
-def _s3_error_code(error: Exception) -> str | None:
-    return getattr(error, "response", {}).get("Error", {}).get("Code")
 
 
 def export_glb(inputs: dict) -> dict:
@@ -47,7 +43,7 @@ def export_glb(inputs: dict) -> dict:
         try:
             cached = storage.head_object(Bucket=bucket, Key=key)
         except Exception as error:
-            if _s3_error_code(error) not in MISSING_OBJECT:
+            if s3_error_code(error) not in MISSING_OBJECT:
                 raise
             cached = None
 
@@ -61,7 +57,7 @@ def export_glb(inputs: dict) -> dict:
             try:
                 source = storage.get_object(Bucket=bucket, Key=asset_source_key(asset_id))
             except Exception as error:
-                if _s3_error_code(error) in MISSING_OBJECT:
+                if s3_error_code(error) in MISSING_OBJECT:
                     return {"error": "No USDZ source was found for this asset_id."}
                 raise
 

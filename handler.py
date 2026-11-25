@@ -15,7 +15,9 @@ from urllib.error import URLError
 from urllib.parse import urlsplit
 from urllib.request import Request, urlopen
 
-from scripts.asset_storage import GLB_MIME_TYPE, USDZ_MIME_TYPE, asset_source_key, download_url, storage_client
+from scripts.asset_storage import (
+    GLB_MIME_TYPE, USDZ_MIME_TYPE, asset_source_key, download_url, storage_client, white_mesh_key,
+)
 from scripts.generation_options import GenerationOptions, generation_options
 
 LOGGER = logging.getLogger(__name__)
@@ -61,7 +63,7 @@ def _upload_glb(path: Path, bucket: str) -> str:
 def _upload_white_mesh(path: Path, bucket: str) -> dict:
     client = storage_client()
     asset_id = uuid.uuid4().hex
-    key = f"pixal3d/white-mesh/{asset_id}.glb"
+    key = white_mesh_key(asset_id)
     client.upload_file(str(path), bucket, key, ExtraArgs={"ContentType": GLB_MIME_TYPE})
     return {"asset_id": asset_id, "glb_url": download_url(client, bucket, key)}
 
@@ -153,7 +155,17 @@ def handler(job: dict) -> dict:
 
         return export_glb(inputs)
 
+    if inputs.get("action") == "prepare_hi3d_cache":
+        from scripts.hi3d_models import prefill_hi3d_models
+
+        try:
+            return prefill_hi3d_models()
+        except Exception:
+            LOGGER.exception("Hi3D Global Volume prefill failed")
+            return {"error": "Hi3D model preparation failed. See the worker logs for details."}
+
     white_mesh = inputs.get("action") == "generate_white_mesh"
+    refine_mesh = inputs.get("action") == "refine_white_mesh"
     image_url = inputs.get("image_url")
     image_base64 = inputs.get("image_base64")
     if not image_url and not image_base64:
@@ -184,7 +196,7 @@ def handler(job: dict) -> dict:
     if not isinstance(skip_rembg, bool):
         return {"error": "input.skip_rembg must be a boolean."}
 
-    output_format = inputs.get("output_format", "auto")
+    output_format = inputs.get("output_format", "url" if refine_mesh else "auto")
     if output_format not in ("auto", "base64", "url"):
         return {"error": "input.output_format must be auto, base64 or url."}
     bucket = os.environ.get("PIXAL3D_OUTPUT_BUCKET")
@@ -193,16 +205,23 @@ def handler(job: dict) -> dict:
         return {"error": "input.asset_format must be glb or usdz."}
     if white_mesh and asset_format != "glb":
         return {"error": "White mesh generation requires input.asset_format=glb."}
+    if refine_mesh and (asset_format != "glb" or output_format != "url"):
+        return {"error": "Hi3D refinement requires input.asset_format=glb and input.output_format=url."}
     if asset_format == "usdz" and output_format == "base64":
         return {"error": "USDZ source assets require URL output."}
     if (asset_format == "usdz" or output_format == "url") and not bucket:
         return {"error": "Set PIXAL3D_OUTPUT_BUCKET on the endpoint to use URL output."}
 
     try:
-        options = generation_options(inputs, asset_format=asset_format, white_mesh=white_mesh)
+        if refine_mesh:
+            from hi3d_handler import refinement_options, refine_white_mesh
+
+            refinement = refinement_options(inputs)
+        else:
+            options = generation_options(inputs, asset_format=asset_format, white_mesh=white_mesh)
     except ValueError as exc:
         return {"error": str(exc)}
-    if options.num_samples > 1:
+    if not refine_mesh and options.num_samples > 1:
         if output_format == "base64" or not bucket:
             return {"error": "Multiple samples require URL output and PIXAL3D_OUTPUT_BUCKET."}
         output_format = "url"
@@ -221,6 +240,12 @@ def handler(job: dict) -> dict:
             return {"error": str(exc)}
         fetch_seconds = round(time.monotonic() - started, 2)
         print(f"[request] Input image ready after {fetch_seconds:.2f}s", flush=True)
+
+        if refine_mesh:
+            result = refine_white_mesh(input_path, directory, bucket, refinement, seed=seed, skip_rembg=skip_rembg)
+            if "timing" in result:
+                result["timing"]["fetch_seconds"] = fetch_seconds
+            return result
 
         generated = []
         for index in range(options.num_samples):
