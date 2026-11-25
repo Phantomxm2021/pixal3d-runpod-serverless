@@ -12,6 +12,7 @@ import tempfile
 import time
 
 from scripts.asset_storage import GLB_MIME_TYPE, asset_source_key, download_url, storage_client
+from scripts.mesh_options import glb_options
 from scripts.mesh_stats import glb_stats
 
 LOGGER = logging.getLogger(__name__)
@@ -29,12 +30,10 @@ def export_glb(inputs: dict) -> dict:
     asset_id = inputs.get("asset_id")
     if not isinstance(asset_id, str) or not re.fullmatch(r"[0-9a-f]{32}", asset_id):
         return {"error": "Use the asset_id from the USDZ generation response."}
-    triangle_limit = inputs.get("target_triangles", 30_000)
-    texture_limit = inputs.get("texture_size", 2048)
-    if type(triangle_limit) is not int or not 1_000 <= triangle_limit <= 200_000:
-        return {"error": "input.target_triangles must be an integer between 1000 and 200000."}
-    if type(texture_limit) is not int or texture_limit not in (512, 1024, 2048):
-        return {"error": "input.texture_size must be 512, 1024 or 2048."}
+    try:
+        triangle_limit, texture_limit = glb_options(inputs, default_triangles=30_000)
+    except ValueError as exc:
+        return {"error": str(exc)}
     bucket = os.environ.get("PIXAL3D_OUTPUT_BUCKET")
     if not bucket:
         return {"error": "Set PIXAL3D_OUTPUT_BUCKET on the endpoint."}

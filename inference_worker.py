@@ -13,6 +13,7 @@ from contextlib import ExitStack
 from pathlib import Path
 
 from scripts.global_models import stage_dinov3
+from scripts.mesh_options import DEFAULT_GENERATION_TRIANGLES, DEFAULT_TEXTURE_SIZE
 from scripts.model_cache import (
     DEFAULT_BIREFNET_MODEL,
     DINO_MODEL_NAME,
@@ -353,6 +354,7 @@ def _estimate_camera(image: Image.Image, mesh_scale: float, extend_pixel: int, i
 
 def run_inference(
     input_image: Path, output_path: Path, *, seed: int, skip_rembg: bool,
+    target_triangles: int = DEFAULT_GENERATION_TRIANGLES, texture_size: int = DEFAULT_TEXTURE_SIZE,
 ) -> tuple[dict[str, float], dict[str, int]]:
     t_start = time.monotonic()
     stage_start = t_start
@@ -408,13 +410,16 @@ def run_inference(
 
         quad_asset = QuadAsset(mesh.vertices, mesh.faces, mesh.quad_faces)
 
-    _log(f"Preparing textured {output_path.suffix[1:].upper()}")
+    if as_usdz:
+        _log("Preparing textured USDZ")
+    else:
+        _log(f"Preparing GLB with a target of {target_triangles} triangles and {texture_size}px textures")
     glb = o_voxel.postprocess.to_glb(
         vertices=mesh.vertices, faces=mesh.faces, attr_volume=mesh.attrs,
         coords=mesh.coords, attr_layout=PIPELINE.pbr_attr_layout,
         grid_size=grid_res,
         aabb=[[-0.5, -0.5, -0.5], [0.5, 0.5, 0.5]],
-        decimation_target=200_000, texture_size=2048,
+        decimation_target=target_triangles, texture_size=texture_size,
         remesh=True, remesh_band=1, remesh_project=0, use_tqdm=False,
         quad_asset=quad_asset,
     )

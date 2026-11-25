@@ -17,6 +17,7 @@ from urllib.parse import urlsplit
 from urllib.request import Request, urlopen
 
 from scripts.asset_storage import GLB_MIME_TYPE, USDZ_MIME_TYPE, asset_source_key, download_url, storage_client
+from scripts.mesh_options import DEFAULT_GENERATION_TRIANGLES, DEFAULT_TEXTURE_SIZE, glb_options
 
 LOGGER = logging.getLogger(__name__)
 MAX_IMAGE_BYTES = 20_000_000
@@ -68,6 +69,7 @@ def _upload_usdz(path: Path, bucket: str) -> dict:
 
 def _run_inference(
     input_path: Path, output_path: Path, *, seed: int, skip_rembg: bool,
+    target_triangles: int = DEFAULT_GENERATION_TRIANGLES, texture_size: int = DEFAULT_TEXTURE_SIZE,
 ) -> tuple[dict[str, float], dict[str, int]]:
     print("[request] Importing inference worker", flush=True)
     cold = "inference_worker" not in sys.modules
@@ -76,7 +78,10 @@ def _run_inference(
 
     worker_ready_seconds = round(time.monotonic() - started, 2)
     print(f"[request] Inference worker ready in {worker_ready_seconds:.2f}s, starting inference", flush=True)
-    timing, geometry = run_inference(input_path, output_path, seed=seed, skip_rembg=skip_rembg)
+    timing, geometry = run_inference(
+        input_path, output_path, seed=seed, skip_rembg=skip_rembg,
+        target_triangles=target_triangles, texture_size=texture_size,
+    )
     if cold:
         timing = {"worker_ready_seconds": worker_ready_seconds, **MODEL_LOAD_TIMINGS, **timing}
     return timing, geometry
@@ -162,6 +167,14 @@ def handler(job: dict) -> dict:
     if (asset_format == "usdz" or output_format == "url") and not bucket:
         return {"error": "Set PIXAL3D_OUTPUT_BUCKET on the endpoint to use URL output."}
 
+    mesh_options = {}
+    if asset_format == "glb":
+        try:
+            target_triangles, texture_size = glb_options(inputs, default_triangles=DEFAULT_GENERATION_TRIANGLES)
+        except ValueError as exc:
+            return {"error": str(exc)}
+        mesh_options = {"target_triangles": target_triangles, "texture_size": texture_size}
+
     with tempfile.TemporaryDirectory(prefix="pixal3d-job-") as workdir:
         directory = Path(workdir)
         input_path = directory / f"input.{suffix.lstrip('.')}"
@@ -179,7 +192,9 @@ def handler(job: dict) -> dict:
         print(f"[request] Input image ready after {fetch_seconds:.2f}s", flush=True)
 
         try:
-            timing, geometry = _run_inference(input_path, output_path, seed=seed, skip_rembg=skip_rembg)
+            timing, geometry = _run_inference(
+                input_path, output_path, seed=seed, skip_rembg=skip_rembg, **mesh_options,
+            )
             size = output_path.stat().st_size if output_path.is_file() else 0
         except Exception:
             LOGGER.exception("Pixal3D inference failed")
@@ -195,6 +210,7 @@ def handler(job: dict) -> dict:
             "filename": output_path.name,
             "mime_type": USDZ_MIME_TYPE if asset_format == "usdz" else GLB_MIME_TYPE,
             "size_bytes": size,
+            **mesh_options,
             **geometry,
             "timing": {"fetch_seconds": fetch_seconds, **timing},
         }

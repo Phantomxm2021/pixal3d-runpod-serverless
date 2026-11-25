@@ -71,8 +71,16 @@ curl -fsS "https://api.runpod.ai/v2/$RUNPOD_ENDPOINT_ID/status/$JOB_ID" \
 | `skip_rembg` | Boolean. Defaults to `false`. Set `true` for images that are already prepared as clean RGB inputs. |
 | `output_format` | `auto` (default), `base64`, or `url`. |
 | `asset_format` | `glb` (default) or `usdz`. USDZ requires an output bucket and uses URL delivery. |
+| `target_triangles` | Direct GLB only. Integer from 1,000 to 200,000. Defaults to 200,000. |
+| `texture_size` | Direct GLB only. Bake square textures at 512, 1024 or 2048 pixels. Defaults to 2048. |
 
-The response includes `filename`, `mime_type`, `size_bytes`, the exported mesh's `triangle_count` and `vertex_count`, `timing`, and either `glb_base64` or `glb_url`. Invalid inputs and inference errors surface as a Runpod job error. Inference exception details are available in the worker logs.
+For example, generate a GLB in one request with a 30,000-triangle target and 1024px textures:
+
+```json
+{"input":{"image_url":"https://example.com/object.png","asset_format":"glb","target_triangles":30000,"texture_size":1024,"output_format":"url"}}
+```
+
+The response includes the chosen `target_triangles` and `texture_size`, the mesh's actual `triangle_count` and `vertex_count`, `filename`, `mime_type`, `size_bytes`, `timing`, and either `glb_base64` or `glb_url`. The triangle target guides simplification. Invalid inputs and inference errors surface as a Runpod job error. Inference exception details are available in the worker logs.
 
 ### Return large GLB files through S3
 
