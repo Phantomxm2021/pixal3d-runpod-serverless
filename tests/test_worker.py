@@ -35,12 +35,14 @@ class RunpodWorkerTests(unittest.TestCase):
         self.assertIn("Handler returned", markers[5])
 
     def test_base64_input_and_output(self):
-        def infer(source, output, *, seed, skip_rembg, target_triangles, texture_size):
+        def infer(source, output, *, seed, skip_rembg, options):
             self.assertEqual(source.read_bytes(), b"image")
             self.assertEqual(source.suffix, ".jpg")
             self.assertEqual(seed, 5)
             self.assertTrue(skip_rembg)
-            self.assertEqual((target_triangles, texture_size), (200_000, 2048))
+            self.assertEqual(options.postprocess["decimation_target"], 200_000)
+            self.assertEqual(options.postprocess["texture_size"], 2048)
+            self.assertEqual(options.pipeline["pipeline_type"], "1024_cascade")
             output.write_bytes(b"glTF")
             return {"inference_seconds": 1}, {"triangle_count": 200, "vertex_count": 150}
 
@@ -57,24 +59,59 @@ class RunpodWorkerTests(unittest.TestCase):
         self.assertEqual(result["vertex_count"], 150)
 
     def test_direct_glb_passes_requested_bake_options_to_inference(self):
-        def infer(source, output, *, seed, skip_rembg, target_triangles, texture_size):
+        def infer(source, output, *, seed, skip_rembg, options):
             self.assertEqual(output.suffix, ".glb")
-            self.assertEqual((target_triangles, texture_size), (30_000, 1024))
+            self.assertEqual(options.postprocess["decimation_target"], 30_000)
+            self.assertEqual(options.postprocess["texture_size"], 1024)
+            self.assertFalse(options.postprocess["remesh"])
+            self.assertEqual(options.texture_format, "png")
+            self.assertEqual(options.pipeline["pipeline_type"], "1536_cascade")
+            self.assertEqual(options.pipeline["max_num_tokens"], 32000)
+            self.assertEqual(options.pipeline["shape_slat_sampler_params"], {"steps": 8, "guidance_interval": (0.5, 1)})
+            self.assertAlmostEqual(options.camera["manual_fov"], 0.34906585)
             output.write_bytes(b"glTF")
-            return {}, {"triangle_count": 29_998, "vertex_count": 15_000}
+            return {}, {"triangle_count": 29_998, "vertex_count": 15_000, "mesh_resolution": 1280}
 
-        inference = SimpleNamespace(run_inference=Mock(side_effect=infer), MODEL_LOAD_TIMINGS={})
+        inference = SimpleNamespace(run_job_sample=Mock(side_effect=infer), prepare_models=Mock(return_value=True), MODEL_LOAD_TIMINGS={})
         with patch.dict(sys.modules, {"inference_worker": inference}):
             result = worker.handler({"input": {
                 "image_base64": "aW1hZ2U=",
                 "target_triangles": 30_000,
                 "texture_size": 1024,
+                "texture_format": "png",
+                "remesh": False,
+                "resolution": 1536,
+                "max_num_tokens": 32000,
+                "shape_slat_sampler_params": {"steps": 8, "guidance_interval": [0.5, 1]},
+                "manual_fov": 20,
+                "fov_unit": "deg",
+                "low_vram": True,
             }})
 
-        inference.run_inference.assert_called_once()
+        inference.run_job_sample.assert_called_once()
+        inference.prepare_models.assert_called_once_with(low_vram=True)
         self.assertEqual(result["target_triangles"], 30_000)
         self.assertEqual(result["triangle_count"], 29_998)
         self.assertEqual(result["texture_size"], 1024)
+        self.assertEqual(result["mesh_resolution"], 1280)
+
+    def test_multiple_samples_use_distinct_seeds_and_publish_urls(self):
+        def infer(source, output, **kwargs):
+            self.assertEqual(source.read_bytes(), b"image")
+            output.write_bytes(b"glTF")
+            return {}, {"triangle_count": 10, "vertex_count": 6}
+
+        with patch.object(worker, "_run_inference", side_effect=infer) as run, \
+             patch.object(worker, "_upload_glb", side_effect=[
+                 "https://storage.example/first.glb", "https://storage.example/second.glb",
+             ]), patch.dict(os.environ, {"PIXAL3D_OUTPUT_BUCKET": "results"}, clear=True):
+            result = worker.handler({"input": {
+                "image_base64": "aW1hZ2U=", "num_samples": 2, "seed": 2**64 - 1,
+            }})
+        self.assertEqual([call.kwargs["seed"] for call in run.call_args_list], [2**64 - 1, 0])
+        self.assertEqual([asset["filename"] for asset in result["assets"]], ["output-1.glb", "output-2.glb"])
+        self.assertEqual([asset["glb_url"] for asset in result["assets"]],
+                         ["https://storage.example/first.glb", "https://storage.example/second.glb"])
 
     def test_oversized_glb_can_be_uploaded(self):
         def infer(source, output, **kwargs):
@@ -145,10 +182,16 @@ class RunpodWorkerTests(unittest.TestCase):
             {"image_base64": "aW1hZ2U=", "skip_rembg": "false"},
             {"image_base64": "aW1hZ2U=", "output_format": "url"},
             {"image_base64": "aW1hZ2U=", "target_triangles": 999},
-            {"image_base64": "aW1hZ2U=", "target_triangles": 200_001},
+            {"image_base64": "aW1hZ2U=", "target_triangles": 1_000_001},
             {"image_base64": "aW1hZ2U=", "target_triangles": True},
             {"image_base64": "aW1hZ2U=", "texture_size": 1536},
             {"image_base64": "aW1hZ2U=", "texture_size": 1024.0},
+            {"image_base64": "aW1hZ2U=", "resolution": 1536, "pipeline_type": "1024_cascade"},
+            {"image_base64": "aW1hZ2U=", "tex_slat_sampler_params": {"guidance_interval": [1, 0]}},
+            {"image_base64": "aW1hZ2U=", "shape_slat_sampler_params": {"steps": 0}},
+            {"image_base64": "aW1hZ2U=", "camera_params": {"camera_angle_x": 0.2}},
+            {"image_base64": "aW1hZ2U=", "remesh": False, "remesh_project": 0.5},
+            {"image_base64": "aW1hZ2U=", "num_samples": 2, "output_format": "base64"},
             {"image_base64": "aW1hZ2U=", "asset_format": "usdz"},
             {"image_base64": "aW1hZ2U=", "asset_format": "usdz", "output_format": "base64"},
         ]

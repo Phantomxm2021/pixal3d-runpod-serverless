@@ -12,8 +12,8 @@ import time
 from contextlib import ExitStack
 from pathlib import Path
 
+from scripts.generation_options import GenerationOptions
 from scripts.global_models import stage_dinov3
-from scripts.mesh_options import DEFAULT_GENERATION_TRIANGLES, DEFAULT_TEXTURE_SIZE
 from scripts.model_cache import (
     DEFAULT_BIREFNET_MODEL,
     DINO_MODEL_NAME,
@@ -149,10 +149,10 @@ def _load_pixal3d_pipeline() -> tuple[Pixal3DImageTo3DPipeline, dict[str, float]
     }
 
 
-def _prepare_pipeline(pipeline: Pixal3DImageTo3DPipeline) -> dict[str, float]:
+def _prepare_pipeline(pipeline: Pixal3DImageTo3DPipeline, *, low_vram: bool) -> dict[str, float]:
     dino_path = str(GLOBAL_MODEL_ROOT / "dinov3") if GLOBAL_MODELS else DINO_MODEL_NAME
-    pipeline.low_vram = False
-    _log("Transferring Pixal3D pipeline to CUDA")
+    pipeline.low_vram = low_vram
+    _log("Selecting CUDA for Pixal3D with stage offload" if low_vram else "Transferring Pixal3D pipeline to CUDA")
     started = time.monotonic()
     pipeline.cuda()
     torch.cuda.synchronize()
@@ -182,10 +182,11 @@ def _prepare_pipeline(pipeline: Pixal3DImageTo3DPipeline) -> dict[str, float]:
         timings["dinov3_load_seconds"] = round(time.monotonic() - started, 2)
         _log(f"DINOv3 CPU load complete in {timings['dinov3_load_seconds']:.2f}s")
 
-        _log("Transferring shared DINOv3 to CUDA")
         started = time.monotonic()
-        dino_model.cuda()
-        torch.cuda.synchronize()
+        if not low_vram:
+            _log("Transferring shared DINOv3 to CUDA")
+            dino_model.cuda()
+            torch.cuda.synchronize()
         timings["dinov3_cuda_seconds"] = round(time.monotonic() - started, 2)
         _log(f"DINOv3 CUDA transfer complete in {timings['dinov3_cuda_seconds']:.2f}s")
 
@@ -200,11 +201,13 @@ def _prepare_pipeline(pipeline: Pixal3DImageTo3DPipeline) -> dict[str, float]:
     _log(f"Projection modules initialized in {projection_load_seconds:.2f}s")
 
     started = time.monotonic()
-    for cond_model in cond_models:
-        cond_model.proj_grid.cuda()
-    torch.cuda.synchronize()
+    if not low_vram:
+        for cond_model in cond_models:
+            cond_model.proj_grid.cuda()
+        torch.cuda.synchronize()
     projection_cuda_seconds = time.monotonic() - started
-    _log(f"Projection modules moved to CUDA in {projection_cuda_seconds:.2f}s")
+    if not low_vram:
+        _log(f"Projection modules moved to CUDA in {projection_cuda_seconds:.2f}s")
 
     timings.update({
         "dinov3_and_projection_load_seconds": round(timings["dinov3_load_seconds"] + projection_load_seconds, 2),
@@ -257,7 +260,7 @@ def _read_moge_checkpoint() -> tuple[dict, dict[str, float]]:
         return checkpoint, {**timings, "moge_checkpoint_read_seconds": read_seconds}
 
 
-def _build_moge() -> tuple[MoGeModel, dict[str, float]]:
+def _build_moge(*, low_vram: bool) -> tuple[MoGeModel, dict[str, float]]:
     checkpoint, read_timings = _read_moge_checkpoint()
 
     # Match the pinned MoGeModel.from_pretrained constructor and state-dict options.
@@ -278,12 +281,12 @@ def _build_moge() -> tuple[MoGeModel, dict[str, float]]:
     cpu_init_seconds = round(time.monotonic() - init_started, 2)
     _log(f"MoGe-2 CPU initialization complete in {cpu_init_seconds:.2f}s")
 
-    torch.cuda.synchronize()
-    _log("Transferring MoGe-2 to CUDA")
-    memory_stage("moge_cuda_transfer")
     started = time.monotonic()
-    m = m.to("cuda")
-    torch.cuda.synchronize()
+    if not low_vram:
+        _log("Transferring MoGe-2 to CUDA")
+        memory_stage("moge_cuda_transfer")
+        m = m.to("cuda")
+        torch.cuda.synchronize()
     cuda_seconds = round(time.monotonic() - started, 2)
     _log(f"MoGe-2 CUDA transfer complete in {cuda_seconds:.2f}s")
     m.eval()
@@ -296,26 +299,35 @@ def _build_moge() -> tuple[MoGeModel, dict[str, float]]:
     }
 
 
-_load_start = time.monotonic()
-try:
-    PIPELINE, _pipeline_timings = _load_pixal3d_pipeline()
-    _pipeline_load_seconds = time.monotonic() - _load_start
-    _log(f"Pixal3D pipeline load complete in {_pipeline_load_seconds:.2f}s")
-    _conditioning_timings = _prepare_pipeline(PIPELINE)
-    MOGE_MODEL, _moge_timings = _build_moge()
-except Exception:
-    _log(f"Model load failed after {time.monotonic() - _load_start:.2f}s")
-    raise
-finally:
-    memory_stage("")
-MODEL_LOAD_TIMINGS = {
-    "pixal3d_pipeline_load_seconds": round(_pipeline_load_seconds, 2),
-    "model_load_seconds": round(time.monotonic() - _load_start, 2),
-    **_pipeline_timings,
-    **_conditioning_timings,
-    **_moge_timings,
-}
-_log(f"Model load complete in {MODEL_LOAD_TIMINGS['model_load_seconds']:.2f}s")
+PIPELINE = None
+MOGE_MODEL = None
+MODEL_LOAD_TIMINGS = {}
+
+
+def prepare_models(*, low_vram: bool = False) -> bool:
+    global PIPELINE, MOGE_MODEL
+    if PIPELINE is not None:
+        return False
+    started = time.monotonic()
+    try:
+        pipeline, pipeline_timings = _load_pixal3d_pipeline()
+        pipeline_seconds = time.monotonic() - started
+        _log(f"Pixal3D pipeline load complete in {pipeline_seconds:.2f}s")
+        conditioning_timings = _prepare_pipeline(pipeline, low_vram=low_vram)
+        moge, moge_timings = _build_moge(low_vram=low_vram)
+    except Exception:
+        _log(f"Model load failed after {time.monotonic() - started:.2f}s")
+        raise
+    finally:
+        memory_stage("")
+    PIPELINE, MOGE_MODEL = pipeline, moge
+    MODEL_LOAD_TIMINGS.update({
+        "pixal3d_pipeline_load_seconds": round(pipeline_seconds, 2),
+        "model_load_seconds": round(time.monotonic() - started, 2),
+        **pipeline_timings, **conditioning_timings, **moge_timings,
+    })
+    _log(f"Model load complete in {MODEL_LOAD_TIMINGS['model_load_seconds']:.2f}s")
+    return True
 
 
 # ---------------------------------------------------------------------------
@@ -338,23 +350,78 @@ def _distance_from_fov(camera_angle_x, grid_point, target_point, mesh_scale, ima
     return f_pixels * xw / x_ndc - yw
 
 
-def _estimate_camera(image: Image.Image, mesh_scale: float, extend_pixel: int, image_resolution: int) -> dict:
+def _estimate_fov(image: Image.Image) -> float:
     width = image.width
     img_t = torch.from_numpy(np.asarray(image.convert("RGB"), dtype=np.float32) / 255.0).permute(2, 0, 1).cuda()
     with torch.no_grad():
         out = MOGE_MODEL.infer(img_t)
     intrinsics = out["intrinsics"].squeeze().cpu().numpy()
     fx = intrinsics[0, 0] * width
-    camera_angle_x = 2 * math.atan(width / (2 * fx))
+    return 2 * math.atan(width / (2 * fx))
+
+
+def _camera_for_image(
+    image: Image.Image, *, camera_params: dict | None = None, manual_fov: float | None = None,
+    mesh_scale: float = 1.0, extend_pixel: int = 0, image_resolution: int = 512,
+) -> dict:
+    if camera_params is not None:
+        return camera_params
+    camera_angle_x = manual_fov
+    if camera_angle_x is None:
+        if PIPELINE.low_vram:
+            MOGE_MODEL.cuda()
+        try:
+            camera_angle_x = _estimate_fov(image)
+        finally:
+            if PIPELINE.low_vram:
+                MOGE_MODEL.cpu()
     grid_point = torch.tensor([-1.0, 0.0, 0.0])
     target = torch.tensor([0 - extend_pixel, image_resolution - 1 + extend_pixel])
     distance = _distance_from_fov(camera_angle_x, grid_point, target, mesh_scale, image_resolution)
     return {"camera_angle_x": camera_angle_x, "distance": float(distance), "mesh_scale": mesh_scale}
 
 
+def _set_low_vram(enabled: bool, *, force: bool = False) -> None:
+    if not force and PIPELINE.low_vram == enabled:
+        return
+    conditioning = [getattr(PIPELINE, f"image_cond_model_{stage}") for stage in IMAGE_COND_CONFIGS]
+    if enabled:
+        for model in PIPELINE.models.values():
+            model.cpu()
+            if hasattr(model, "low_vram"):
+                model.low_vram = False
+        PIPELINE.rembg_model.cpu()
+        for model in conditioning:
+            model.cpu()
+        MOGE_MODEL.cpu()
+        PIPELINE.low_vram = True
+        # In low-VRAM mode, this selects CUDA without moving model weights.
+        PIPELINE.cuda()
+    else:
+        PIPELINE.low_vram = False
+        try:
+            PIPELINE.cuda()
+            for model in conditioning:
+                model.cuda()
+            MOGE_MODEL.cuda()
+        except Exception:
+            _set_low_vram(True, force=True)
+            raise
+
+
+def run_job_sample(input_image: Path, output_path: Path, *, seed: int, skip_rembg: bool, options: GenerationOptions):
+    try:
+        return run_inference(input_image, output_path, seed=seed, skip_rembg=skip_rembg, options=options)
+    except Exception:
+        if options.low_vram:
+            # A failure can interrupt a stage before it moves its model back to CPU.
+            _set_low_vram(True, force=True)
+        raise
+
+
 def run_inference(
     input_image: Path, output_path: Path, *, seed: int, skip_rembg: bool,
-    target_triangles: int = DEFAULT_GENERATION_TRIANGLES, texture_size: int = DEFAULT_TEXTURE_SIZE,
+    options: GenerationOptions,
 ) -> tuple[dict[str, float], dict[str, int]]:
     t_start = time.monotonic()
     stage_start = t_start
@@ -369,6 +436,7 @@ def run_inference(
         _log(f"{name} complete in {seconds:.2f}s")
         stage_start = time.monotonic()
 
+    _set_low_vram(options.low_vram)
     _log("Preprocessing input image")
     with Image.open(input_image) as image:
         if skip_rembg:
@@ -378,8 +446,8 @@ def run_inference(
             image_for_pipeline = PIPELINE.preprocess_image(image)
     finish_stage("preprocess")
 
-    _log("Estimating camera with MoGe-2")
-    camera_params = _estimate_camera(image_for_pipeline, mesh_scale=1.0, extend_pixel=0, image_resolution=512)
+    _log("Resolving camera parameters")
+    camera_params = _camera_for_image(image_for_pipeline, **options.camera)
     finish_stage("camera")
 
     _log("Running Pixal3D mesh and texture generation")
@@ -393,10 +461,9 @@ def run_inference(
             seed=seed,
             preprocess_image=False,
             return_latent=True,
-            pipeline_type="1024_cascade",
-            max_num_tokens=49152,
             stage_finished=finish_stage,
             retain_quads=as_usdz,
+            **options.pipeline,
         )
     timings["generation_seconds"] = round(time.monotonic() - generation_start, 2)
     timings["shape_upsample_seconds"] = round(
@@ -413,15 +480,15 @@ def run_inference(
     if as_usdz:
         _log("Preparing textured USDZ")
     else:
-        _log(f"Preparing GLB with a target of {target_triangles} triangles and {texture_size}px textures")
+        _log(f"Preparing GLB with {options.postprocess['decimation_target']} target triangles "
+             f"and {options.postprocess['texture_size']}px textures")
     glb = o_voxel.postprocess.to_glb(
         vertices=mesh.vertices, faces=mesh.faces, attr_volume=mesh.attrs,
         coords=mesh.coords, attr_layout=PIPELINE.pbr_attr_layout,
         grid_size=grid_res,
         aabb=[[-0.5, -0.5, -0.5], [0.5, 0.5, 0.5]],
-        decimation_target=target_triangles, texture_size=texture_size,
-        remesh=True, remesh_band=1, remesh_project=0, use_tqdm=False,
         quad_asset=quad_asset,
+        **options.postprocess,
     )
     finish_stage("usdz_postprocess" if quad_asset is not None else "glb_postprocess")
 
@@ -437,7 +504,9 @@ def run_inference(
         geometry = quad_asset.export(glb, output_path)
         finish_stage("usdz_encode")
     else:
-        glb.export(str(output_path), extension_webp=True)
+        glb.export(str(output_path), extension_webp=options.texture_format == "webp")
         finish_stage("glb_encode")
         geometry = {"triangle_count": len(glb.faces), "vertex_count": len(glb.vertices)}
-    return {"inference_seconds": round(time.monotonic() - t_start, 2), **timings}, geometry
+    return {"inference_seconds": round(time.monotonic() - t_start, 2), **timings}, {
+        "mesh_resolution": grid_res, **geometry,
+    }

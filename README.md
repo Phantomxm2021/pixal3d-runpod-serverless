@@ -71,8 +71,13 @@ curl -fsS "https://api.runpod.ai/v2/$RUNPOD_ENDPOINT_ID/status/$JOB_ID" \
 | `skip_rembg` | Boolean. Defaults to `false`. Set `true` for images that are already prepared as clean RGB inputs. |
 | `output_format` | `auto` (default), `base64`, or `url`. |
 | `asset_format` | `glb` (default) or `usdz`. USDZ requires an output bucket and uses URL delivery. |
-| `target_triangles` | Direct GLB only. Integer from 1,000 to 200,000. Defaults to 200,000. |
-| `texture_size` | Direct GLB only. Bake square textures at 512, 1024 or 2048 pixels. Defaults to 2048. |
+| `target_triangles` | Direct GLB only. Integer from 1,000 to 1,000,000. Defaults to 200,000. |
+| `texture_size` | Bake square GLB or USDZ textures at 512, 1024, 2048 or 4096 pixels. Defaults to 2048. |
+| `texture_format` | `webp` (default) or `png` for direct GLB. USDZ uses `png`. |
+| `resolution` or `pipeline_type` | `1024` (default) or `1536`, equivalently `1024_cascade` or `1536_cascade`. |
+| `max_num_tokens` | Integer from 1 to 65,536. Defaults to 49,152. The 1536 cascade can reduce its resolution until the token count is below this threshold or reaches resolution 1024. |
+| `low_vram` | Boolean, defaults to `false`. When true, models move to GPU as their stages run and back to CPU afterward. |
+| `num_samples` | Integer from 1 to 4, default 1. Multiple samples run sequentially with incrementing seeds and require URL output. |
 
 For example, generate a GLB in one request with a 30,000-triangle target and 1024px textures:
 
@@ -80,7 +85,15 @@ For example, generate a GLB in one request with a 30,000-triangle target and 102
 {"input":{"image_url":"https://example.com/object.png","asset_format":"glb","target_triangles":30000,"texture_size":1024,"output_format":"url"}}
 ```
 
-The response includes the chosen `target_triangles` and `texture_size`, the mesh's actual `triangle_count` and `vertex_count`, `filename`, `mime_type`, `size_bytes`, `timing`, and either `glb_base64` or `glb_url`. The triangle target guides simplification. Invalid inputs and inference errors surface as a Runpod job error. Inference exception details are available in the worker logs.
+The response includes the requested `pipeline_type` and the actual `mesh_resolution`, along with the texture settings, actual geometry counts, and timing. The GLB response includes `target_triangles` and either `glb_base64` or `glb_url`. The triangle target guides simplification. A multi-sample response contains `num_samples` and an ordered `assets` array; each entry has the same fields as a single result. Invalid inputs and inference errors surface as a Runpod job error. Inference exception details are available in the worker logs.
+
+#### Samplers, camera and UVs
+
+Override individual settings in `sparse_structure_sampler_params`, `shape_slat_sampler_params` or `tex_slat_sampler_params`. The shape settings apply to both shape stages. Each object accepts `steps` (1–50), `guidance_strength` (0–20), `guidance_rescale` (0–1), `rescale_t` (0.01–20), and `guidance_interval` (ordered pair between 0 and 1). The configured snapshot supplies defaults for omitted values.
+
+MoGe-2 estimates the camera by default. Set `manual_fov` and optionally `fov_unit` (`rad` by default, or `deg`) to use a horizontal field of view of 1–170 degrees. Pass `mesh_scale` (default 1), `extend_pixel` (default 0) and `image_resolution` (default 512) to adjust framing. For a calibrated camera, pass `camera_params` with `camera_angle_x` in radians, positive `distance`, and optional `mesh_scale`.
+
+Direct GLB accepts `remesh` (default `true`). With remeshing enabled, `remesh_band` ranges from 0.25 to 4 (default 1), and `remesh_project` from 0 to 1 (default 0). GLB and USDZ both accept `mesh_cluster_threshold_cone_half_angle_rad` (0.01–π, default π/2), `mesh_cluster_refine_iterations` (0–8, default 0), `mesh_cluster_global_iterations` (1–8, default 1), `mesh_cluster_smooth_strength` (0–10, default 1), and `postprocess_verbose` (default `false`) for detailed post-process logs. USDZ keeps the source quads.
 
 ### Return large GLB files through S3
 
@@ -112,7 +125,7 @@ Submit the following payload to the same endpoint's `/run` operation. Blender is
 }
 ```
 
-Both export options are optional. The default is a 30,000-triangle target and 2048px maximum texture dimension. Blender accepts targets from 1,000 to 200,000 triangles and texture sizes of 512, 1024 and 2048. The response includes the actual triangle and vertex counts, a `glb_url`, and `cached`. Repeating the same export parameters reuses the stored GLB. GLB uses triangles and the USDZ retains the editable quads.
+Both export options are optional. The default is a 30,000-triangle target and 2048px maximum texture dimension. Blender accepts targets from 1,000 to 200,000 triangles and texture sizes of 512, 1024, 2048 and 4096. The response includes the actual triangle and vertex counts, a `glb_url`, and `cached`. Repeating the same export parameters reuses the stored GLB. GLB uses triangles and the USDZ retains the editable quads.
 
 ## Test locally
 

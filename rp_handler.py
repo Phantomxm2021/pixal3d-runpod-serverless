@@ -42,7 +42,9 @@ if __name__ == '__main__':
     if os.environ.get('RUNPOD_WEBHOOK_GET_JOB') and not (global_volume or model_cache):
         # Preload the GPU models before accepting queued jobs.
         print('[startup] Preloading models before SDK registration', flush=True)
-        import inference_worker
+        from inference_worker import prepare_models
+
+        prepare_models()
 
     print(f'[startup] Registering handler with Runpod SDK (global_volume={global_volume}, model_cache={model_cache})', flush=True)
     runpod.serverless.start({'handler': handler })
