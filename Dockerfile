@@ -119,26 +119,37 @@ RUN ln -s /opt/blender/blender /usr/local/bin/blender \
     && blender -b -t 2 --factory-startup --python-exit-code 1 --python-expr \
         'import bpy; assert bpy.app.version == (5, 2, 1); bpy.ops.wm.usd_import.get_rna_type(); bpy.ops.export_scene.gltf.get_rna_type()'
 
+# Bundle the public camera checkpoint to avoid Global Volume reads during inference.
+RUN python3.10 -c "from huggingface_hub import hf_hub_download; \
+        hf_hub_download('Ruicheng/moge-2-vitl', 'model.pt', \
+                        revision='39c4d5e957afe587e04eec59dc2bcc3be5ecd968', local_dir='/opt/moge')" \
+    && echo '3eefd4abb2102f38f12b2d1992e5ff15e4923e5431c67dd494afe157e0111cd5  /opt/moge/model.pt' | sha256sum --check \
+    && rm -rf /opt/moge/.cache
+
 COPY rp_handler.py handler.py export_handler.py inference_worker.py /app/
 COPY scripts /app/scripts
 COPY patches/pixal3d-shared-dinov3.patch /tmp/pixal3d-shared-dinov3.patch
+COPY patches/pixal3d-profile-weights.patch /tmp/pixal3d-profile-weights.patch
 COPY patches/ovoxel-quad-bake.patch /tmp/ovoxel-quad-bake.patch
 
-RUN python3.10 -m pip install 'usd-core==25.11'
+RUN python3.10 -m pip install 'usd-core==25.11' 'safetensors==0.8.0'
 
 # Runpod's image builder has no GPU. Importing o_voxel or the Pixal3D
 # pipeline initializes FlexGEMM's Triton driver during import. Check that
 # those modules are present here and load them on the GPU worker at startup.
 RUN git -C /app/Pixal3D apply /tmp/pixal3d-shared-dinov3.patch \
+    && git -C /app/Pixal3D apply /tmp/pixal3d-profile-weights.patch \
     && OVOXEL_PARENT="$(python3.10 -c 'from importlib.util import find_spec; from pathlib import Path; print(Path(find_spec("o_voxel").origin).parent.parent)')" \
     && git -C "$OVOXEL_PARENT" apply /tmp/ovoxel-quad-bake.patch \
-    && rm /tmp/pixal3d-shared-dinov3.patch /tmp/ovoxel-quad-bake.patch \
+    && rm /tmp/pixal3d-shared-dinov3.patch /tmp/pixal3d-profile-weights.patch /tmp/ovoxel-quad-bake.patch \
     && python3.10 -m pip check \
     && PYTHONPATH=/app/Pixal3D python3.10 -c "from importlib.util import find_spec; \
         import torch, runpod, boto3, flash_attn, flash_attn_interface, natten; \
         from moge.model.v2 import MoGeModel; \
         from transformers import DINOv3ViTModel; \
         from pxr import UsdUtils; \
+        from inspect import signature; from safetensors.torch import load_file; \
+        assert 'backend' in signature(load_file).parameters; \
         missing = [name for name in ('o_voxel', 'flex_gemm', 'pixal3d') if find_spec(name) is None]; \
         assert not missing, f'Missing worker modules: {missing}'; \
         assert torch.version.cuda == '12.4', f'Unexpected PyTorch CUDA version: {torch.version.cuda}'; \

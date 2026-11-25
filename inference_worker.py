@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import math
 import os
+import shutil
 import sys
 import tempfile
 import time
@@ -29,6 +30,7 @@ from scripts.worker_diagnostics import memory_stage
 
 PIXAL_DIR = Path("/app/Pixal3D")
 HOPPER_NATTEN_DIR = Path("/opt/natten-hopper")
+LOCAL_MOGE_CHECKPOINT = Path("/opt/moge/model.pt")
 
 
 def _log(message: str) -> None:
@@ -107,7 +109,8 @@ IMAGE_COND_CONFIGS = {
 }
 
 
-def _load_pixal3d_pipeline() -> Pixal3DImageTo3DPipeline:
+def _load_pixal3d_pipeline() -> tuple[Pixal3DImageTo3DPipeline, dict[str, float]]:
+    started = time.monotonic()
     if RUNPOD_MODEL_CACHE:
         _log("Resolving Pixal3D weights in the Runpod node cache")
         snapshot, config = runpod_pipeline_snapshot()
@@ -116,12 +119,20 @@ def _load_pixal3d_pipeline() -> Pixal3DImageTo3DPipeline:
         if GLOBAL_MODELS:
             model_path = str(GLOBAL_MODEL_ROOT / "pixal3d")
         snapshot, config = pipeline_snapshot(model_path)
+    snapshot_seconds = time.monotonic() - started
+    _log(f"Pixal3D snapshot resolved in {snapshot_seconds:.2f}s")
     _log(f"Loading Pixal3D pipeline from {snapshot}")
     rembg_path = os.environ.get("BIREFNET_MODEL_PATH", DEFAULT_BIREFNET_MODEL)
     baked_path = Path("/opt/birefnet")
     if rembg_path == DEFAULT_BIREFNET_MODEL and (baked_path / "config.json").is_file():
         rembg_path = str(baked_path)
     config["args"]["rembg_model"]["args"]["model_name"] = rembg_path
+
+    stage_seconds = {"construct": 0.0, "checkpoint_read": 0.0, "state_dict": 0.0}
+
+    def record_stage(model: str, stage: str, seconds: float) -> None:
+        stage_seconds[stage] += seconds
+        _log(f"Pixal3D {model} {stage} complete in {seconds:.2f}s")
 
     # Keep the downloaded snapshot immutable and give Pixal3D local paths to its weights.
     with tempfile.TemporaryDirectory(prefix="pixal3d-pipeline-") as workdir:
@@ -130,7 +141,11 @@ def _load_pixal3d_pipeline() -> Pixal3DImageTo3DPipeline:
             if entry.name != "pipeline.json":
                 (pipeline_dir / entry.name).symlink_to(entry, target_is_directory=entry.is_dir())
         (pipeline_dir / "pipeline.json").write_text(json.dumps(config), encoding="utf-8")
-        return Pixal3DImageTo3DPipeline.from_pretrained(str(pipeline_dir))
+        pipeline = Pixal3DImageTo3DPipeline.from_pretrained(str(pipeline_dir), load_timing=record_stage)
+    return pipeline, {
+        "pixal3d_snapshot_seconds": round(snapshot_seconds, 2),
+        **{f"pixal3d_{stage}_seconds": round(seconds, 2) for stage, seconds in stage_seconds.items()},
+    }
 
 
 def _prepare_pipeline(pipeline: Pixal3DImageTo3DPipeline) -> dict[str, float]:
@@ -159,9 +174,10 @@ def _prepare_pipeline(pipeline: Pixal3DImageTo3DPipeline) -> dict[str, float]:
                 timings["dinov3_local_stage_seconds"] = round(time.monotonic() - started, 2)
                 _log(f"DINOv3 local staging complete in {timings['dinov3_local_stage_seconds']:.2f}s")
 
-        _log(f"Loading shared DINOv3 from {load_path}")
+        dino_dtype = torch.bfloat16 if torch.cuda.is_bf16_supported(including_emulation=False) else torch.float32
+        _log(f"Loading shared DINOv3 from {load_path} with dtype={dino_dtype}")
         started = time.monotonic()
-        dino_model = DINOv3ViTModel.from_pretrained(load_path)
+        dino_model = DINOv3ViTModel.from_pretrained(load_path, dtype=dino_dtype)
         timings["dinov3_load_seconds"] = round(time.monotonic() - started, 2)
         _log(f"DINOv3 CPU load complete in {timings['dinov3_load_seconds']:.2f}s")
 
@@ -207,23 +223,41 @@ def _prepare_pipeline(pipeline: Pixal3DImageTo3DPipeline) -> dict[str, float]:
     return timings
 
 
-def _build_moge() -> tuple[MoGeModel, dict[str, float]]:
+def _read_moge_checkpoint() -> tuple[dict, dict[str, float]]:
     name = os.environ.get("MOGE_MODEL_PATH", MOGE_MODEL_NAME)
-    if GLOBAL_MODELS:
-        name = str(GLOBAL_MODEL_ROOT / "moge/model.pt")
     path = Path(name)
-    if not GLOBAL_MODELS and not path.is_file():
-        from huggingface_hub import hf_hub_download
+    timings = {}
+    with ExitStack() as stack:
+        if name == MOGE_MODEL_NAME and LOCAL_MOGE_CHECKPOINT.is_file():
+            path = LOCAL_MOGE_CHECKPOINT
+        elif name == MOGE_MODEL_NAME and GLOBAL_MODELS:
+            _log("Staging the Global Volume MoGe-2 checkpoint to local scratch")
+            memory_stage("moge_local_stage")
+            started = time.monotonic()
+            directory = stack.enter_context(tempfile.TemporaryDirectory(
+                prefix="moge-", dir=os.environ["XDG_CACHE_HOME"],
+            ))
+            path = Path(directory) / "model.pt"
+            shutil.copyfile(GLOBAL_MODEL_ROOT / "moge/model.pt", path)
+            timings["moge_local_stage_seconds"] = round(time.monotonic() - started, 2)
+            _log(f"MoGe-2 local staging complete in {timings['moge_local_stage_seconds']:.2f}s")
+        elif not path.is_file():
+            from huggingface_hub import hf_hub_download
 
-        _log(f"Resolving MoGe-2 checkpoint for {name}")
-        path = Path(hf_hub_download(repo_id=name, repo_type="model", filename="model.pt"))
+            _log(f"Resolving MoGe-2 checkpoint for {name}")
+            path = Path(hf_hub_download(repo_id=name, repo_type="model", filename="model.pt"))
 
-    _log(f"Reading MoGe-2 checkpoint on CPU from {path}")
-    memory_stage("moge_checkpoint_read")
-    started = time.monotonic()
-    checkpoint = torch.load(path, map_location="cpu", weights_only=True)
-    read_seconds = round(time.monotonic() - started, 2)
-    _log(f"MoGe-2 checkpoint read complete in {read_seconds:.2f}s")
+        _log(f"Reading MoGe-2 checkpoint on CPU from {path}")
+        memory_stage("moge_checkpoint_read")
+        started = time.monotonic()
+        checkpoint = torch.load(path, map_location="cpu", weights_only=True)
+        read_seconds = round(time.monotonic() - started, 2)
+        _log(f"MoGe-2 checkpoint read complete in {read_seconds:.2f}s")
+        return checkpoint, {**timings, "moge_checkpoint_read_seconds": read_seconds}
+
+
+def _build_moge() -> tuple[MoGeModel, dict[str, float]]:
+    checkpoint, read_timings = _read_moge_checkpoint()
 
     # Match the pinned MoGeModel.from_pretrained constructor and state-dict options.
     _log("Creating MoGe-2 model on CPU")
@@ -253,7 +287,7 @@ def _build_moge() -> tuple[MoGeModel, dict[str, float]]:
     _log(f"MoGe-2 CUDA transfer complete in {cuda_seconds:.2f}s")
     m.eval()
     return m, {
-        "moge_checkpoint_read_seconds": read_seconds,
+        **read_timings,
         "moge_cpu_init_seconds": cpu_init_seconds,
         "moge_model_create_seconds": create_seconds,
         "moge_state_dict_load_seconds": state_dict_seconds,
@@ -263,7 +297,7 @@ def _build_moge() -> tuple[MoGeModel, dict[str, float]]:
 
 _load_start = time.monotonic()
 try:
-    PIPELINE = _load_pixal3d_pipeline()
+    PIPELINE, _pipeline_timings = _load_pixal3d_pipeline()
     _pipeline_load_seconds = time.monotonic() - _load_start
     _log(f"Pixal3D pipeline load complete in {_pipeline_load_seconds:.2f}s")
     _conditioning_timings = _prepare_pipeline(PIPELINE)
@@ -276,6 +310,7 @@ finally:
 MODEL_LOAD_TIMINGS = {
     "pixal3d_pipeline_load_seconds": round(_pipeline_load_seconds, 2),
     "model_load_seconds": round(time.monotonic() - _load_start, 2),
+    **_pipeline_timings,
     **_conditioning_timings,
     **_moge_timings,
 }

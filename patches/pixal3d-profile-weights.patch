@@ -1,0 +1,96 @@
+diff --git a/pixal3d/models/__init__.py b/pixal3d/models/__init__.py
+index d4fed03..8f84348 100644
+--- a/pixal3d/models/__init__.py
++++ b/pixal3d/models/__init__.py
+@@ -36,5 +36,5 @@ def __getattr__(name):
+
+
+-def from_pretrained(path: str, **kwargs):
++def from_pretrained(path: str, *, load_timing=None, **kwargs):
+     """
+     Load a model from a pretrained checkpoint.
+@@ -47,4 +47,5 @@ def from_pretrained(path: str, **kwargs):
+     import os
+     import json
++    from time import monotonic
+     from safetensors.torch import load_file
+     is_local = os.path.exists(f"{path}.json") and os.path.exists(f"{path}.safetensors")
+@@ -63,6 +64,18 @@ def from_pretrained(path: str, **kwargs):
+     with open(config_file, 'r') as f:
+         config = json.load(f)
++    started = monotonic()
+     model = __getattr__(config['name'])(**config['args'], **kwargs)
+-    model.load_state_dict(load_file(model_file), strict=False)
++    if load_timing is None:
++        model.load_state_dict(load_file(model_file), strict=False)
++        return model
++
++    load_timing("construct", monotonic() - started)
++    started = monotonic()
++    # mmap defers file reads into load_state_dict. pread reads the data here.
++    state_dict = load_file(model_file, backend="pread")
++    load_timing("checkpoint_read", monotonic() - started)
++    started = monotonic()
++    model.load_state_dict(state_dict, strict=False)
++    load_timing("state_dict", monotonic() - started)
+
+     return model
+diff --git a/pixal3d/pipelines/base.py b/pixal3d/pipelines/base.py
+index 331e1ed..37f0c06 100644
+--- a/pixal3d/pipelines/base.py
++++ b/pixal3d/pipelines/base.py
+@@ -20,5 +20,5 @@ class Pipeline:
+
+     @classmethod
+-    def from_pretrained(cls, path: str, config_file: str = "pipeline.json") -> "Pipeline":
++    def from_pretrained(cls, path: str, config_file: str = "pipeline.json", *, load_timing=None) -> "Pipeline":
+         """
+         Load a pretrained model.
+@@ -26,4 +26,5 @@ class Pipeline:
+         import os
+         import json
++        from functools import partial
+         is_local = os.path.exists(f"{path}/{config_file}")
+
+@@ -41,4 +42,9 @@ class Pipeline:
+             if hasattr(cls, 'model_names_to_load') and k not in cls.model_names_to_load:
+                 continue
++            if load_timing is not None and is_local:
++                _models[k] = models.from_pretrained(
++                    f"{path}/{v}", load_timing=partial(load_timing, k)
++                )
++                continue
+             try:
+                 _models[k] = models.from_pretrained(f"{path}/{v}")
+diff --git a/pixal3d/pipelines/pixal3d_image_to_3d.py b/pixal3d/pipelines/pixal3d_image_to_3d.py
+index db8dae7..8e88f6d 100644
+--- a/pixal3d/pipelines/pixal3d_image_to_3d.py
++++ b/pixal3d/pipelines/pixal3d_image_to_3d.py
+@@ -93,5 +93,7 @@ class Pixal3DImageTo3DPipeline(Pipeline):
+
+     @classmethod
+-    def from_pretrained(cls, path: str, config_file: str = "pipeline.json") -> "Pixal3DImageTo3DPipeline":
++    def from_pretrained(
++        cls, path: str, config_file: str = "pipeline.json", *, load_timing=None
++    ) -> "Pixal3DImageTo3DPipeline":
+         """
+         Load a pretrained model.
+@@ -100,5 +102,5 @@ class Pixal3DImageTo3DPipeline(Pipeline):
+             path (str): The path to the model. Can be either local path or a Hugging Face repository.
+         """
+-        pipeline = super().from_pretrained(path, config_file)
++        pipeline = super().from_pretrained(path, config_file, load_timing=load_timing)
+         args = pipeline._pretrained_args
+
+diff --git a/pixal3d/trainers/flow_matching/mixins/image_conditioned_proj.py b/pixal3d/trainers/flow_matching/mixins/image_conditioned_proj.py
+index f5d67e7..428613c 100644
+--- a/pixal3d/trainers/flow_matching/mixins/image_conditioned_proj.py
++++ b/pixal3d/trainers/flow_matching/mixins/image_conditioned_proj.py
+@@ -633,5 +633,6 @@ class DinoV3ProjFeatureExtractor(nn.Module):
+             z = cache.get(cache_key) if cache is not None else None
+             if z is None:
+-                z = self.extract_features(image)
++                # Projection coordinates and the frozen NAF model use FP32.
++                z = self.extract_features(image).float()
+                 if cache is not None:
+                     cache[cache_key] = z
