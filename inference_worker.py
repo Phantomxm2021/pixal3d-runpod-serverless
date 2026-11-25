@@ -317,7 +317,7 @@ def _estimate_camera(image: Image.Image, mesh_scale: float, extend_pixel: int, i
 
 
 def run_inference(
-    input_image: Path, output_glb: Path, *, seed: int, skip_rembg: bool,
+    input_image: Path, output_path: Path, *, seed: int, skip_rembg: bool,
 ) -> tuple[dict[str, float], dict[str, int]]:
     t_start = time.monotonic()
     stage_start = t_start
@@ -347,6 +347,7 @@ def run_inference(
 
     _log("Running Pixal3D mesh and texture generation")
     generation_start = time.monotonic()
+    as_usdz = output_path.suffix == ".usdz"
     torch.manual_seed(seed)
     with cache_dinov3_features(image_for_pipeline):
         mesh_list, (_shape_slat, _tex_slat, grid_res) = PIPELINE.run(
@@ -358,6 +359,7 @@ def run_inference(
             pipeline_type="1024_cascade",
             max_num_tokens=49152,
             stage_finished=finish_stage,
+            retain_quads=as_usdz,
         )
     timings["generation_seconds"] = round(time.monotonic() - generation_start, 2)
     timings["shape_upsample_seconds"] = round(
@@ -365,16 +367,23 @@ def run_inference(
     )
     mesh = mesh_list[0]
 
-    _log("Exporting textured GLB")
+    quad_asset = None
+    if as_usdz:
+        from scripts.quad_asset import QuadAsset
+
+        quad_asset = QuadAsset(mesh.vertices, mesh.faces, mesh.quad_faces)
+
+    _log(f"Preparing textured {output_path.suffix[1:].upper()}")
     glb = o_voxel.postprocess.to_glb(
         vertices=mesh.vertices, faces=mesh.faces, attr_volume=mesh.attrs,
         coords=mesh.coords, attr_layout=PIPELINE.pbr_attr_layout,
         grid_size=grid_res,
         aabb=[[-0.5, -0.5, -0.5], [0.5, 0.5, 0.5]],
-        decimation_target=200000, texture_size=2048,
+        decimation_target=200_000, texture_size=2048,
         remesh=True, remesh_band=1, remesh_project=0, use_tqdm=False,
+        quad_asset=quad_asset,
     )
-    finish_stage("glb_postprocess")
+    finish_stage("usdz_postprocess" if quad_asset is not None else "glb_postprocess")
 
     rot = np.array([
         [-1,  0,  0, 0],
@@ -384,7 +393,11 @@ def run_inference(
     ], dtype=np.float64)
     glb.apply_transform(rot)
 
-    glb.export(str(output_glb), extension_webp=True)
-    finish_stage("glb_encode")
-    geometry = {"triangle_count": len(glb.faces), "vertex_count": len(glb.vertices)}
+    if quad_asset is not None:
+        geometry = quad_asset.export(glb, output_path)
+        finish_stage("usdz_encode")
+    else:
+        glb.export(str(output_path), extension_webp=True)
+        finish_stage("glb_encode")
+        geometry = {"triangle_count": len(glb.faces), "vertex_count": len(glb.vertices)}
     return {"inference_seconds": round(time.monotonic() - t_start, 2), **timings}, geometry

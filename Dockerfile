@@ -25,6 +25,16 @@ RUN NATTEN_CUDA_ARCH='8.0' NATTEN_N_WORKERS="${NATTEN_N_WORKERS}" NATTEN_IS_BUIL
     && grep -qx sm_80 /tmp/natten-archs.txt \
     && rm -rf /tmp/natten-check /tmp/natten-cubins.txt /tmp/natten-archs.txt
 
+FROM debian:bookworm-slim AS blender-download
+
+RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates curl xz-utils \
+    && curl --fail --silent --show-error --location --retry 3 \
+        https://download.blender.org/release/Blender5.2/blender-5.2.1-linux-x64.tar.xz -o /tmp/blender.tar.xz \
+    && echo 'a31f524fa99a527d3d52b7f5aaa68c34e1a19d5a1c9473f79c5cc610fd5b10e9  /tmp/blender.tar.xz' | sha256sum --check \
+    && mkdir /opt/blender \
+    && tar --extract --xz --file=/tmp/blender.tar.xz --directory=/opt/blender --strip-components=1 \
+    && rm /tmp/blender.tar.xz
+
 FROM nvidia/cuda:12.4.1-runtime-ubuntu22.04
 
 ENV DEBIAN_FRONTEND=noninteractive \
@@ -100,20 +110,35 @@ RUN python3.10 -c "from huggingface_hub import snapshot_download; \
 
 WORKDIR /app
 
-COPY rp_handler.py handler.py inference_worker.py /app/
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        libegl1 libgomp1 libice6 libsm6 libx11-6 libxext6 libxi6 libxkbcommon0 libxrender1 \
+        libxxf86vm1 libwayland-client0 libwayland-cursor0 libpulse0 \
+    && rm -rf /var/lib/apt/lists/*
+COPY --from=blender-download /opt/blender /opt/blender
+RUN ln -s /opt/blender/blender /usr/local/bin/blender \
+    && blender -b -t 2 --factory-startup --python-exit-code 1 --python-expr \
+        'import bpy; assert bpy.app.version == (5, 2, 1); bpy.ops.wm.usd_import.get_rna_type(); bpy.ops.export_scene.gltf.get_rna_type()'
+
+COPY rp_handler.py handler.py export_handler.py inference_worker.py /app/
 COPY scripts /app/scripts
 COPY patches/pixal3d-shared-dinov3.patch /tmp/pixal3d-shared-dinov3.patch
+COPY patches/ovoxel-quad-bake.patch /tmp/ovoxel-quad-bake.patch
+
+RUN python3.10 -m pip install 'usd-core==25.11'
 
 # Runpod's image builder has no GPU. Importing o_voxel or the Pixal3D
 # pipeline initializes FlexGEMM's Triton driver during import. Check that
 # those modules are present here and load them on the GPU worker at startup.
 RUN git -C /app/Pixal3D apply /tmp/pixal3d-shared-dinov3.patch \
-    && rm /tmp/pixal3d-shared-dinov3.patch \
+    && OVOXEL_PARENT="$(python3.10 -c 'from importlib.util import find_spec; from pathlib import Path; print(Path(find_spec("o_voxel").origin).parent.parent)')" \
+    && git -C "$OVOXEL_PARENT" apply /tmp/ovoxel-quad-bake.patch \
+    && rm /tmp/pixal3d-shared-dinov3.patch /tmp/ovoxel-quad-bake.patch \
     && python3.10 -m pip check \
     && PYTHONPATH=/app/Pixal3D python3.10 -c "from importlib.util import find_spec; \
         import torch, runpod, boto3, flash_attn, flash_attn_interface, natten; \
         from moge.model.v2 import MoGeModel; \
         from transformers import DINOv3ViTModel; \
+        from pxr import UsdUtils; \
         missing = [name for name in ('o_voxel', 'flex_gemm', 'pixal3d') if find_spec(name) is None]; \
         assert not missing, f'Missing worker modules: {missing}'; \
         assert torch.version.cuda == '12.4', f'Unexpected PyTorch CUDA version: {torch.version.cuda}'; \

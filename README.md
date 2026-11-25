@@ -70,6 +70,7 @@ curl -fsS "https://api.runpod.ai/v2/$RUNPOD_ENDPOINT_ID/status/$JOB_ID" \
 | `seed` | Integer. Defaults to `42`. |
 | `skip_rembg` | Boolean. Defaults to `false`. Set `true` for images that are already prepared as clean RGB inputs. |
 | `output_format` | `auto` (default), `base64`, or `url`. |
+| `asset_format` | `glb` (default) or `usdz`. USDZ requires an output bucket and uses URL delivery. |
 
 The response includes `filename`, `mime_type`, `size_bytes`, the exported mesh's `triangle_count` and `vertex_count`, `timing`, and either `glb_base64` or `glb_url`. Invalid inputs and inference errors surface as a Runpod job error. Inference exception details are available in the worker logs.
 
@@ -85,6 +86,25 @@ Inline output supports GLBs up to 7 MB so the Base64 response fits both Runpod q
 | `PIXAL3D_OUTPUT_ENDPOINT_URL` | Optional S3-compatible API endpoint, such as the R2 S3 API URL shown in the bucket settings. |
 
 The worker returns a presigned `glb_url` that expires after one hour. Use a bucket lifecycle rule if the stored GLBs should expire as well.
+
+### Generate an editable source and export GLB variants
+
+Use the existing GPU endpoint with the same image fields and request `asset_format: "usdz"`. The worker retains the decoder's native quad mesh, bakes base color and metallic-roughness textures, and stores a self-contained USDZ in the private output bucket. The response includes `asset_id`, `usdz_url`, `quad_count` and `vertex_count`. Keep the asset ID to request new GLB variants after the download URL expires. The USDZ stores the full source topology and GLB decimation runs on the CPU.
+
+Submit the following payload to the same endpoint's `/run` operation. Blender is bundled in the worker image and runs its export in background mode on the CPU. An export uses the GPU endpoint's worker time and skips Pixal3D inference.
+
+```json
+{
+  "input": {
+    "action": "export_glb",
+    "asset_id": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    "target_triangles": 30000,
+    "texture_size": 2048
+  }
+}
+```
+
+Both export options are optional. The default is a 30,000-triangle target and 2048px maximum texture dimension. Blender accepts targets from 1,000 to 200,000 triangles and texture sizes of 512, 1024 and 2048. The response includes the actual triangle and vertex counts, a `glb_url`, and `cached`. Repeating the same export parameters reuses the stored GLB. GLB uses triangles and the USDZ retains the editable quads.
 
 ## Test locally
 

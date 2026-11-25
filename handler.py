@@ -16,9 +16,9 @@ from urllib.error import URLError
 from urllib.parse import urlsplit
 from urllib.request import Request, urlopen
 
+from scripts.asset_storage import GLB_MIME_TYPE, USDZ_MIME_TYPE, asset_source_key, download_url, storage_client
 
 LOGGER = logging.getLogger(__name__)
-GLB_MIME_TYPE = "model/gltf-binary"
 MAX_IMAGE_BYTES = 20_000_000
 # Leave room for base64 expansion and the JSON envelope inside /run's 10 MB limit.
 MAX_INLINE_GLB_BYTES = 7_000_000
@@ -52,19 +52,18 @@ def _decode_image(data: str, output: Path) -> None:
 
 
 def _upload_glb(path: Path, bucket: str) -> str:
-    import boto3
-    from botocore.config import Config
-
-    client = boto3.client(
-        "s3",
-        endpoint_url=os.environ.get("PIXAL3D_OUTPUT_ENDPOINT_URL"),
-        config=Config(signature_version="s3v4"),
-    )
+    client = storage_client()
     key = f"pixal3d/{uuid.uuid4().hex}.glb"
     client.upload_file(str(path), bucket, key, ExtraArgs={"ContentType": GLB_MIME_TYPE})
-    return client.generate_presigned_url(
-        "get_object", Params={"Bucket": bucket, "Key": key}, ExpiresIn=3600
-    )
+    return download_url(client, bucket, key)
+
+
+def _upload_usdz(path: Path, bucket: str) -> dict:
+    client = storage_client()
+    asset_id = uuid.uuid4().hex
+    key = asset_source_key(asset_id)
+    client.upload_file(str(path), bucket, key, ExtraArgs={"ContentType": USDZ_MIME_TYPE})
+    return {"asset_id": asset_id, "usdz_url": download_url(client, bucket, key)}
 
 
 def _run_inference(
@@ -84,7 +83,7 @@ def _run_inference(
 
 
 def handler(job: dict) -> dict:
-    """Generate a GLB and return it inline or as a temporary download URL."""
+    """Generate or export an asset on the Pixal3D endpoint."""
     inputs = job.get("input")
     if not isinstance(inputs, dict):
         return {"error": "Provide an input object with image_url or image_base64."}
@@ -115,6 +114,11 @@ def handler(job: dict) -> dict:
         except Exception as exc:
             LOGGER.exception("Runpod node cache preparation failed")
             return {"error": f"Runpod node cache preparation failed: {exc}"}
+
+    if inputs.get("action") == "export_glb":
+        from export_handler import export_glb
+
+        return export_glb(inputs)
 
     image_url = inputs.get("image_url")
     image_base64 = inputs.get("image_base64")
@@ -150,13 +154,18 @@ def handler(job: dict) -> dict:
     if output_format not in ("auto", "base64", "url"):
         return {"error": "input.output_format must be auto, base64 or url."}
     bucket = os.environ.get("PIXAL3D_OUTPUT_BUCKET")
-    if output_format == "url" and not bucket:
+    asset_format = inputs.get("asset_format", "glb")
+    if asset_format not in ("glb", "usdz"):
+        return {"error": "input.asset_format must be glb or usdz."}
+    if asset_format == "usdz" and output_format == "base64":
+        return {"error": "USDZ source assets require URL output."}
+    if (asset_format == "usdz" or output_format == "url") and not bucket:
         return {"error": "Set PIXAL3D_OUTPUT_BUCKET on the endpoint to use URL output."}
 
     with tempfile.TemporaryDirectory(prefix="pixal3d-job-") as workdir:
         directory = Path(workdir)
         input_path = directory / f"input.{suffix.lstrip('.')}"
-        output_path = directory / "output.glb"
+        output_path = directory / f"output.{asset_format}"
         started = time.monotonic()
         print("[request] Reading input image", flush=True)
         try:
@@ -176,20 +185,29 @@ def handler(job: dict) -> dict:
             LOGGER.exception("Pixal3D inference failed")
             return {"error": "Pixal3D inference failed. See the worker logs for details."}
         if not size:
-            return {"error": "Inference finished but produced no GLB."}
+            return {"error": f"Inference finished but produced no {asset_format.upper()}."}
 
-        print(f"[request] GLB generated ({size} bytes)", flush=True)
+        print(f"[request] {asset_format.upper()} generated ({size} bytes)", flush=True)
         if output_format == "auto":
             output_format = "url" if size > MAX_INLINE_GLB_BYTES and bucket else "base64"
 
         result = {
             "filename": output_path.name,
-            "mime_type": GLB_MIME_TYPE,
+            "mime_type": USDZ_MIME_TYPE if asset_format == "usdz" else GLB_MIME_TYPE,
             "size_bytes": size,
             **geometry,
             "timing": {"fetch_seconds": fetch_seconds, **timing},
         }
         started = time.monotonic()
+        if asset_format == "usdz":
+            try:
+                result.update(_upload_usdz(output_path, bucket))
+            except Exception:
+                LOGGER.exception("USDZ upload failed")
+                return {"error": "USDZ upload failed. Check the worker's S3 configuration and logs."}
+            result["timing"]["upload_seconds"] = round(time.monotonic() - started, 2)
+            return result
+
         if output_format == "url":
             try:
                 result["glb_url"] = _upload_glb(output_path, bucket)

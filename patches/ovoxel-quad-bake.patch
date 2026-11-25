@@ -1,0 +1,47 @@
+diff --git a/o_voxel/convert/flexible_dual_grid.py b/o_voxel/convert/flexible_dual_grid.py
+index 7cf1397..e45d084 100644
+--- a/o_voxel/convert/flexible_dual_grid.py
++++ b/o_voxel/convert/flexible_dual_grid.py
+@@ -149,4 +149,6 @@ def flexible_dual_grid_to_mesh(
+     grid_size: Union[int, list, tuple, np.ndarray, torch.Tensor] = None,
+     train: bool = False,
++    *,
++    retain_quads: bool = False,
+ ):
+     """
+@@ -283,1 +285,5 @@ def flexible_dual_grid_to_mesh(
++    if retain_quads:
++        if train:
++            raise ValueError("Quad output is only available during inference.")
++        return mesh_vertices, mesh_triangles, quad_indices
+     return mesh_vertices, mesh_triangles
+diff --git a/o_voxel/postprocess.py b/o_voxel/postprocess.py
+index 1ce8227..ee66788 100644
+--- a/o_voxel/postprocess.py
++++ b/o_voxel/postprocess.py
+@@ -32,4 +32,6 @@ def to_glb(
+     verbose: bool = False,
+     use_tqdm: bool = False,
++    *,
++    quad_asset=None,
+ ):
+     """
+@@ -133,4 +135,8 @@ def to_glb(
+     # --- Branch 1: Standard Pipeline (Simplification & Cleaning) ---
+-    if not remesh:
++    if quad_asset is not None:
++        # Keep the native dual-grid faces for texturing. The filled mesh and
++        # its BVH are only used as the attribute projection reference.
++        mesh.init(*quad_asset.triangulated_mesh())
++    elif not remesh:
+         # Step 1: Aggressive simplification (3x target)
+         mesh.simplify(decimation_target * 3, verbose=verbose)
+@@ -209,4 +215,8 @@ def to_glb(
+         verbose=verbose,
+     )
++    if quad_asset is not None:
++        out_vertices, out_faces, out_uvs, out_vmaps = quad_asset.atlas(
++            out_faces, out_uvs, out_vmaps, texture_size
++        )
+     out_vertices = out_vertices.cuda()
+     out_faces = out_faces.cuda()

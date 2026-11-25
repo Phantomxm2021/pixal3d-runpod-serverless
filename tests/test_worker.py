@@ -98,6 +98,23 @@ class RunpodWorkerTests(unittest.TestCase):
         self.assertEqual(base64.b64decode(result["glb_base64"]), b"glTF")
         upload.assert_not_called()
 
+    def test_usdz_publishes_the_baked_asset_and_id(self):
+        def infer(source, output, **kwargs):
+            self.assertEqual(output.suffix, ".usdz")
+            output.write_bytes(b"USDZ")
+            return {}, {"quad_count": 2, "vertex_count": 6}
+
+        with patch.object(worker, "_run_inference", side_effect=infer), \
+             patch.object(worker, "_upload_usdz", return_value={
+                 "asset_id": "a" * 32, "usdz_url": "https://storage.example/source.usdz",
+             }) as upload, patch.dict(os.environ, {"PIXAL3D_OUTPUT_BUCKET": "results"}):
+            result = worker.handler({"input": {"image_base64": "aW1hZ2U=", "asset_format": "usdz"}})
+        self.assertEqual(result["quad_count"], 2)
+        self.assertEqual(result["mime_type"], "model/vnd.usdz+zip")
+        self.assertEqual(result["asset_id"], "a" * 32)
+        self.assertEqual(result["usdz_url"], "https://storage.example/source.usdz")
+        self.assertEqual(upload.call_args.args[1], "results")
+
     def test_invalid_jobs_do_not_start_inference(self):
         invalid = [
             None,
@@ -106,6 +123,8 @@ class RunpodWorkerTests(unittest.TestCase):
             {"image_base64": "aW1hZ2U=", "suffix": "../../test"},
             {"image_base64": "aW1hZ2U=", "skip_rembg": "false"},
             {"image_base64": "aW1hZ2U=", "output_format": "url"},
+            {"image_base64": "aW1hZ2U=", "asset_format": "usdz"},
+            {"image_base64": "aW1hZ2U=", "asset_format": "usdz", "output_format": "base64"},
         ]
         with patch.object(worker, "_run_inference") as infer, patch.dict(os.environ, {}, clear=True):
             for inputs in invalid:
