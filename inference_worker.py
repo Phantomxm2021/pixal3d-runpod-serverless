@@ -2,11 +2,9 @@
 
 from __future__ import annotations
 
-import gc
 import json
 import math
 import os
-import shutil
 import sys
 import tempfile
 import time
@@ -14,19 +12,17 @@ from contextlib import ExitStack
 from pathlib import Path
 
 from scripts.generation_options import GenerationOptions
+from scripts.gguf_models import gguf_snapshot
 from scripts.global_models import stage_dinov3
+from scripts.mesh_stats import glb_stats
 from scripts.model_cache import (
     DEFAULT_BIREFNET_MODEL,
     DINO_MODEL_NAME,
     GLOBAL_MODEL_ROOT,
     MOGE_MODEL_NAME,
     NAF_CHECKPOINT,
-    PIXAL3D_MODEL_NAME,
     configure_cache,
-    pipeline_snapshot,
-    runpod_pipeline_snapshot,
     use_global_volume,
-    use_runpod_model_cache,
 )
 from scripts.worker_diagnostics import memory_stage
 
@@ -88,7 +84,7 @@ from pixal3d.trainers.flow_matching.mixins.image_conditioned_proj import (
 def _prepare_global_models() -> None:
     from scripts.global_models import verify_global_models
 
-    verify_global_models(GLOBAL_MODEL_ROOT, include_pipeline=not RUNPOD_MODEL_CACHE)
+    verify_global_models(GLOBAL_MODEL_ROOT)
     checkpoint = Path(torch.hub.get_dir()) / "checkpoints" / NAF_CHECKPOINT
     checkpoint.parent.mkdir(parents=True, exist_ok=True)
     if not checkpoint.exists():
@@ -96,7 +92,6 @@ def _prepare_global_models() -> None:
 
 
 GLOBAL_MODELS = use_global_volume()
-RUNPOD_MODEL_CACHE = use_runpod_model_cache()
 if GLOBAL_MODELS:
     _log("Verifying prefetched Global Volume model files")
     _prepare_global_models()
@@ -113,14 +108,8 @@ IMAGE_COND_CONFIGS = {
 
 def _load_pixal3d_pipeline() -> tuple[Pixal3DImageTo3DPipeline, dict[str, float]]:
     started = time.monotonic()
-    if RUNPOD_MODEL_CACHE:
-        _log("Resolving Pixal3D weights in the Runpod node cache")
-        snapshot, config = runpod_pipeline_snapshot()
-    else:
-        model_path = os.environ.get("PIXAL3D_MODEL_PATH", PIXAL3D_MODEL_NAME)
-        if GLOBAL_MODELS:
-            model_path = str(GLOBAL_MODEL_ROOT / "pixal3d")
-        snapshot, config = pipeline_snapshot(model_path)
+    _log("Resolving the pinned Aero-Ex Pixal3D GGUF snapshot")
+    snapshot, config = gguf_snapshot()
     snapshot_seconds = time.monotonic() - started
     _log(f"Pixal3D snapshot resolved in {snapshot_seconds:.2f}s")
     _log(f"Loading Pixal3D pipeline from {snapshot}")
@@ -130,7 +119,7 @@ def _load_pixal3d_pipeline() -> tuple[Pixal3DImageTo3DPipeline, dict[str, float]
         rembg_path = str(baked_path)
     config["args"]["rembg_model"]["args"]["model_name"] = rembg_path
 
-    stage_seconds = {"construct": 0.0, "checkpoint_read": 0.0, "state_dict": 0.0}
+    stage_seconds = {"construct": 0.0, "gguf_decode": 0.0, "checkpoint_read": 0.0, "state_dict": 0.0}
 
     def record_stage(model: str, stage: str, seconds: float) -> None:
         stage_seconds[stage] += seconds
@@ -231,34 +220,20 @@ def _prepare_pipeline(pipeline: Pixal3DImageTo3DPipeline, *, low_vram: bool) -> 
 def _read_moge_checkpoint() -> tuple[dict, dict[str, float]]:
     name = os.environ.get("MOGE_MODEL_PATH", MOGE_MODEL_NAME)
     path = Path(name)
-    timings = {}
-    with ExitStack() as stack:
-        if name == MOGE_MODEL_NAME and LOCAL_MOGE_CHECKPOINT.is_file():
-            path = LOCAL_MOGE_CHECKPOINT
-        elif name == MOGE_MODEL_NAME and GLOBAL_MODELS:
-            _log("Staging the Global Volume MoGe-2 checkpoint to local scratch")
-            memory_stage("moge_local_stage")
-            started = time.monotonic()
-            directory = stack.enter_context(tempfile.TemporaryDirectory(
-                prefix="moge-", dir=os.environ["XDG_CACHE_HOME"],
-            ))
-            path = Path(directory) / "model.pt"
-            shutil.copyfile(GLOBAL_MODEL_ROOT / "moge/model.pt", path)
-            timings["moge_local_stage_seconds"] = round(time.monotonic() - started, 2)
-            _log(f"MoGe-2 local staging complete in {timings['moge_local_stage_seconds']:.2f}s")
-        elif not path.is_file():
-            from huggingface_hub import hf_hub_download
+    if name == MOGE_MODEL_NAME and LOCAL_MOGE_CHECKPOINT.is_file():
+        path = LOCAL_MOGE_CHECKPOINT
+    elif not path.is_file():
+        from huggingface_hub import hf_hub_download
 
-            _log(f"Resolving MoGe-2 checkpoint for {name}")
-            path = Path(hf_hub_download(repo_id=name, repo_type="model", filename="model.pt"))
+        _log(f"Resolving MoGe-2 checkpoint for {name}")
+        path = Path(hf_hub_download(repo_id=name, repo_type="model", filename="model.pt"))
 
-        _log(f"Reading MoGe-2 checkpoint on CPU from {path}")
-        memory_stage("moge_checkpoint_read")
-        started = time.monotonic()
-        checkpoint = torch.load(path, map_location="cpu", weights_only=True)
-        read_seconds = round(time.monotonic() - started, 2)
-        _log(f"MoGe-2 checkpoint read complete in {read_seconds:.2f}s")
-        return checkpoint, {**timings, "moge_checkpoint_read_seconds": read_seconds}
+    _log(f"Reading MoGe-2 checkpoint on CPU from {path}")
+    memory_stage("moge_checkpoint_read")
+    started = time.monotonic()
+    checkpoint = torch.load(path, map_location="cpu", weights_only=True)
+    read_seconds = round(time.monotonic() - started, 2)
+    return checkpoint, {"moge_checkpoint_read_seconds": read_seconds}
 
 
 def _build_moge(*, low_vram: bool) -> tuple[MoGeModel, dict[str, float]]:
@@ -329,17 +304,6 @@ def prepare_models(*, low_vram: bool = False) -> bool:
     })
     _log(f"Model load complete in {MODEL_LOAD_TIMINGS['model_load_seconds']:.2f}s")
     return True
-
-
-def release_models() -> None:
-    """Free Pixal3D weights before an isolated refinement process uses the GPU."""
-    global PIPELINE, MOGE_MODEL
-    if PIPELINE is not None:
-        PIPELINE = MOGE_MODEL = None
-        MODEL_LOAD_TIMINGS.clear()
-        gc.collect()
-        torch.cuda.empty_cache()
-        _log("Released Pixal3D models for Hi3D")
 
 
 # ---------------------------------------------------------------------------
@@ -470,9 +434,8 @@ def run_inference(
     camera_params = _camera_for_image(image_for_pipeline, **options.camera)
     finish_stage("camera")
 
-    _log("Running Pixal3D white mesh generation" if options.white_mesh else "Running Pixal3D mesh and texture generation")
+    _log("Running Pixal3D GGUF mesh and texture generation")
     generation_start = time.monotonic()
-    as_usdz = output_path.suffix == ".usdz"
     torch.manual_seed(seed)
     with cache_dinov3_features(image_for_pipeline):
         mesh_list, (_shape_slat, _tex_slat, grid_res) = PIPELINE.run(
@@ -482,8 +445,6 @@ def run_inference(
             preprocess_image=False,
             return_latent=True,
             stage_finished=finish_stage,
-            retain_quads=as_usdz,
-            geometry_only=options.white_mesh,
             **options.pipeline,
         )
     timings["generation_seconds"] = round(time.monotonic() - generation_start, 2)
@@ -493,64 +454,32 @@ def run_inference(
         )
     mesh = mesh_list[0]
 
-    if options.white_mesh:
-        import trimesh
-
-        target = options.postprocess["decimation_target"]
-        if len(mesh.faces) > target:
-            mesh.simplify(target)
-        finish_stage("white_mesh_simplify")
-        if not len(mesh.faces):
-            raise RuntimeError("Pixal3D decoded an empty white mesh.")
-        glb = trimesh.Trimesh(vertices=mesh.vertices.cpu().numpy(), faces=mesh.faces.cpu().numpy(), process=False)
-        glb.apply_transform(GLB_ROTATION)
-        glb.export(str(output_path))
-        finish_stage("glb_encode")
-        return {"inference_seconds": round(time.monotonic() - t_start, 2), **timings}, {
-            "mesh_resolution": grid_res, "triangle_count": len(glb.faces), "vertex_count": len(glb.vertices),
-        }
-
-    quad_asset = None
-    if as_usdz:
-        from scripts.quad_asset import QuadAsset
-
-        quad_asset = QuadAsset(mesh.vertices, mesh.faces, mesh.quad_faces)
-
-    if as_usdz:
-        _log("Preparing textured USDZ")
-    else:
-        _log(f"Preparing GLB with {options.postprocess['decimation_target']} target triangles "
-             f"and {options.postprocess['texture_size']}px textures")
+    _log(f"Preparing GLB with {options.postprocess['decimation_target']} target triangles "
+         f"and {options.postprocess['texture_size']}px textures")
     _log(f"UV backend={options.postprocess['uv_backend']}, decoded triangles={len(mesh.faces)}")
-    prefix = "usdz" if as_usdz else "glb"
     postprocess_started = time.monotonic()
 
     def finish_postprocess_stage(name: str) -> None:
-        finish_stage(f"{prefix}_{name}")
+        finish_stage(f"glb_{name}")
 
     glb = o_voxel.postprocess.to_glb(
         vertices=mesh.vertices, faces=mesh.faces, attr_volume=mesh.attrs,
         coords=mesh.coords, attr_layout=PIPELINE.pbr_attr_layout,
         grid_size=grid_res,
         aabb=[[-0.5, -0.5, -0.5], [0.5, 0.5, 0.5]],
-        quad_asset=quad_asset,
         stage_finished=finish_postprocess_stage,
         **options.postprocess,
     )
     finish_postprocess_stage("material")
     postprocess_seconds = round(time.monotonic() - postprocess_started, 2)
-    timings[f"{prefix}_postprocess_seconds"] = postprocess_seconds
-    _log(f"{prefix}_postprocess complete in {postprocess_seconds:.2f}s")
+    timings["glb_postprocess_seconds"] = postprocess_seconds
+    _log(f"glb_postprocess complete in {postprocess_seconds:.2f}s")
 
     glb.apply_transform(GLB_ROTATION)
 
-    if quad_asset is not None:
-        geometry = quad_asset.export(glb, output_path)
-        finish_stage("usdz_encode")
-    else:
-        glb.export(str(output_path), extension_webp=options.texture_format == "webp")
-        finish_stage("glb_encode")
-        geometry = {"triangle_count": len(glb.faces), "vertex_count": len(glb.vertices)}
+    glb.export(str(output_path), extension_webp=options.texture_format == "webp")
+    geometry = glb_stats(output_path)
+    finish_stage("glb_encode")
     return {"inference_seconds": round(time.monotonic() - t_start, 2), **timings}, {
         "mesh_resolution": grid_res, **geometry,
     }

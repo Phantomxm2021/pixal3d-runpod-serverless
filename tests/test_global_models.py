@@ -7,7 +7,6 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import Mock, patch
 
-import handler
 from scripts.global_models import DINO_FILES, NAF_CHECKPOINT, _stream_file, stage_dinov3, verify_global_models
 from scripts.model_cache import configure_cache
 
@@ -37,16 +36,6 @@ class GlobalModelTests(unittest.TestCase):
             configure_cache()
             for key in ("HF_HUB_CACHE", "HF_XET_CACHE", "TORCH_HOME", "TRITON_CACHE_DIR", "FLEX_GEMM_AUTOTUNE_CACHE_PATH"):
                 self.assertTrue(os.environ[key].startswith("/tmp/pixal3d-cache/"), key)
-
-    def test_prefill_action_is_enabled_only_in_prefill_mode(self):
-        job = {"input": {"action": "prefill_models"}}
-        with patch.dict(os.environ, {}, clear=True):
-            self.assertIn("error", handler.handler(job))
-        with patch.dict(os.environ, {"PIXAL3D_GLOBAL_VOLUME": "1", "PIXAL3D_PREFILL_ONLY": "1"}, clear=True), \
-             patch("scripts.global_models.prefill_global_models", return_value={"status": "ready"}) as prefill:
-            self.assertEqual(handler.handler(job), {"status": "ready"})
-            self.assertIn("error", handler.handler({"input": {"image_url": "https://example.org/image"}}))
-            prefill.assert_called_once_with()
 
     def test_prefill_writes_regular_files_and_rejects_truncated_data(self):
         fake = Mock(ok=True, headers={})
@@ -83,10 +72,11 @@ class GlobalModelTests(unittest.TestCase):
                 verify_global_models(root)
             sizes = {name: len(content) for name, content in files.items()}
             (root / "manifest.json").write_text(json.dumps(sizes))
-            self.assertEqual(verify_global_models(root), sizes)
+            aux_sizes = {name: size for name, size in sizes.items() if name.startswith("dinov3/") or name == NAF_CHECKPOINT}
+            self.assertEqual(verify_global_models(root), aux_sizes)
             (root / "pixal3d/pipeline.json").unlink()
-            aux_sizes = {name: size for name, size in sizes.items() if not name.startswith("pixal3d/")}
-            self.assertEqual(verify_global_models(root, include_pipeline=False), aux_sizes)
-            (root / "moge/model.pt").write_text("short")
-            with self.assertRaisesRegex(RuntimeError, "moge/model.pt"):
-                verify_global_models(root, include_pipeline=False)
+            (root / "moge/model.pt").unlink()
+            self.assertEqual(verify_global_models(root), aux_sizes)
+            (root / "dinov3/model.safetensors").write_text("short")
+            with self.assertRaisesRegex(RuntimeError, "dinov3/model.safetensors"):
+                verify_global_models(root)

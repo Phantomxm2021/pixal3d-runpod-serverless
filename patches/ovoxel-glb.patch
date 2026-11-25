@@ -1,44 +1,26 @@
-diff --git a/o_voxel/convert/flexible_dual_grid.py b/o_voxel/convert/flexible_dual_grid.py
-index 7cf1397..e45d084 100644
---- a/o_voxel/convert/flexible_dual_grid.py
-+++ b/o_voxel/convert/flexible_dual_grid.py
-@@ -150,2 +150,4 @@ def flexible_dual_grid_to_mesh(
-     train: bool = False,
-+    *,
-+    retain_quads: bool = False,
- ):
-@@ -283,1 +285,5 @@ def flexible_dual_grid_to_mesh(
-+    if retain_quads:
-+        if train:
-+            raise ValueError("Quad output is only available during inference.")
-+        return mesh_vertices, mesh_triangles, quad_indices
-     return mesh_vertices, mesh_triangles
 diff --git a/o_voxel/postprocess.py b/o_voxel/postprocess.py
-index 1ce8227..14781fd 100644
 --- a/o_voxel/postprocess.py
 +++ b/o_voxel/postprocess.py
-@@ -33,2 +33,6 @@ def to_glb(
+@@ -31,6 +31,9 @@
+     mesh_cluster_smooth_strength=1,
+     verbose: bool = False,
      use_tqdm: bool = False,
 +    *,
-+    quad_asset=None,
 +    uv_backend="legacy",
 +    stage_finished=None,
  ):
-@@ -122,2 +126,4 @@ def to_glb(
+     """
+     Convert an extracted mesh to a GLB file.
+@@ -120,6 +123,8 @@
+     if verbose:
+         print(f"Building BVH for current mesh...", end='', flush=True)
      bvh = cumesh.cuBVH(vertices, faces)
 +    if stage_finished is not None:
 +        stage_finished("bvh")
      if use_tqdm:
-@@ -133,3 +139,7 @@ def to_glb(
-     # --- Branch 1: Standard Pipeline (Simplification & Cleaning) ---
--    if not remesh:
-+    if quad_asset is not None:
-+        # Keep the native dual-grid faces for texturing. The filled mesh and
-+        # its BVH are only used as the attribute projection reference.
-+        mesh.init(*quad_asset.triangulated_mesh())
-+    elif not remesh:
-         # Step 1: Aggressive simplification (3x target)
-@@ -201,11 +211,29 @@ def to_glb(
+         pbar.update(1)
+     if verbose:
+@@ -201,13 +206,25 @@
 -    out_vertices, out_faces, out_uvs, out_vmaps = mesh.uv_unwrap(
 -        compute_charts_kwargs={
 -            "threshold_cone_half_angle_rad": mesh_cluster_threshold_cone_half_angle_rad,
@@ -56,7 +38,7 @@ index 1ce8227..14781fd 100644
 +
 +        current_vertices, current_faces = mesh.read()
 +        out_vertices, out_faces, out_uvs, out_vmaps = unwrap_gpu(
-+            current_vertices, current_faces, texture_size, preserve_faces=quad_asset is not None,
++            current_vertices, current_faces, texture_size,
 +        )
 +    else:
 +        out_vertices, out_faces, out_uvs, out_vmaps = mesh.uv_unwrap(
@@ -71,15 +53,15 @@ index 1ce8227..14781fd 100644
 +        )
 +    if stage_finished is not None:
 +        stage_finished("uv")
-+    if quad_asset is not None:
-+        out_vertices, out_faces, out_uvs, out_vmaps = quad_asset.atlas(
-+            out_faces, out_uvs, out_vmaps, texture_size
-+        )
-+        if stage_finished is not None:
-+            stage_finished("quad_uv")
      out_vertices = out_vertices.cuda()
-@@ -266,2 +294,4 @@ def to_glb(
+     out_faces = out_faces.cuda()
+     out_uvs = out_uvs.cuda()
+@@ -264,6 +281,8 @@
+         grid=((valid_pos - aabb[0]) / voxel_size).reshape(1, -1, 3),
+         mode='trilinear',
      )
 +    if stage_finished is not None:
 +        stage_finished("texture_bake")
      if use_tqdm:
+         pbar.update(1)
+     if verbose:

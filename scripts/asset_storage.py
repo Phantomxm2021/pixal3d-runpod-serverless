@@ -1,21 +1,8 @@
-"""Object names and private delivery shared by the generation and export workers."""
+"""Private GLB delivery through S3-compatible object storage."""
 
 from __future__ import annotations
 
 GLB_MIME_TYPE = "model/gltf-binary"
-USDZ_MIME_TYPE = "model/vnd.usdz+zip"
-
-
-def asset_source_key(asset_id: str) -> str:
-    return f"pixal3d/sources/{asset_id}.usdz"
-
-
-def white_mesh_key(asset_id: str) -> str:
-    return f"pixal3d/white-mesh/{asset_id}.glb"
-
-
-def s3_error_code(error: Exception) -> str | None:
-    return getattr(error, "response", {}).get("Error", {}).get("Code")
 
 
 def storage_client():

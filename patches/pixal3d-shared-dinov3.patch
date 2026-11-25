@@ -1,34 +1,3 @@
-diff --git a/pixal3d/models/sc_vaes/fdg_vae.py b/pixal3d/models/sc_vaes/fdg_vae.py
-index 0209e69..d8ca633 100644
---- a/pixal3d/models/sc_vaes/fdg_vae.py
-+++ b/pixal3d/models/sc_vaes/fdg_vae.py
-@@ -83,3 +83,3 @@ class FlexiDualGridVaeDecoder(SparseUnetVaeDecoder):
--    def forward(self, x: sp.SparseTensor, gt_intersected: sp.SparseTensor = None, **kwargs):
-+    def forward(self, x: sp.SparseTensor, gt_intersected: sp.SparseTensor = None, *, retain_quads=False, **kwargs):
-         decoded = super().forward(x, **kwargs)
-         if self.training:
-@@ -101,10 +101,15 @@ class FlexiDualGridVaeDecoder(SparseUnetVaeDecoder):
-             intersected = h.replace(h.feats[..., 3:6] > 0)
-             quad_lerp = h.replace(F.softplus(h.feats[..., 6:7]))
--            mesh = [Mesh(*flexible_dual_grid_to_mesh(
--                v.coords[:, 1:], v.feats, i.feats, q.feats,
--                aabb=[[-0.5, -0.5, -0.5], [0.5, 0.5, 0.5]],
--                grid_size=self.resolution,
--                train=False
--            )) for v, i, q in zip(vertices, intersected, quad_lerp)]
-+            mesh = []
-+            for v, i, q in zip(vertices, intersected, quad_lerp):
-+                surface = flexible_dual_grid_to_mesh(
-+                    v.coords[:, 1:], v.feats, i.feats, q.feats,
-+                    aabb=[[-0.5, -0.5, -0.5], [0.5, 0.5, 0.5]],
-+                    grid_size=self.resolution, train=False, retain_quads=retain_quads,
-+                )
-+                item = Mesh(*surface[:2])
-+                if retain_quads:
-+                    item.quad_faces = surface[2]
-+                mesh.append(item)
-             out_list[0] = mesh
-             return out_list[0] if len(out_list) == 1 else tuple(out_list)
 diff --git a/pixal3d/models/sc_vaes/sparse_unet_vae.py b/pixal3d/models/sc_vaes/sparse_unet_vae.py
 index b9902a1..1519f6d 100644
 --- a/pixal3d/models/sc_vaes/sparse_unet_vae.py
@@ -48,116 +17,72 @@ index b9902a1..1519f6d 100644
 -       
 \ No newline at end of file
 diff --git a/pixal3d/pipelines/pixal3d_image_to_3d.py b/pixal3d/pipelines/pixal3d_image_to_3d.py
-index 7129482..db8dae7 100644
 --- a/pixal3d/pipelines/pixal3d_image_to_3d.py
 +++ b/pixal3d/pipelines/pixal3d_image_to_3d.py
-@@ -487,4 +487,6 @@ class Pixal3DImageTo3DPipeline(Pipeline):
-         slat: SparseTensor,
-         resolution: int,
-+        *,
-+        retain_quads: bool = False,
-     ) -> Tuple[List[Mesh], List[SparseTensor]]:
-         """
-@@ -502,5 +504,6 @@ class Pixal3DImageTo3DPipeline(Pipeline):
-             self.models['shape_slat_decoder'].to(self.device)
-             self.models['shape_slat_decoder'].low_vram = True
--        ret = self.models['shape_slat_decoder'](slat, return_subs=True)
-+        quad_options = {"retain_quads": True} if retain_quads else {}
-+        ret = self.models['shape_slat_decoder'](slat, return_subs=True, **quad_options)
-         if self.low_vram:
-             self.models['shape_slat_decoder'].cpu()
-@@ -578,4 +581,6 @@ class Pixal3DImageTo3DPipeline(Pipeline):
-         tex_slat: SparseTensor,
-         resolution: int,
-+        *,
-+        retain_quads: bool = False,
-     ) -> List[MeshWithVoxel]:
-         """
-@@ -587,20 +592,22 @@ class Pixal3DImageTo3DPipeline(Pipeline):
-             resolution (int): The resolution of the output.
-         """
--        meshes, subs = self.decode_shape_slat(shape_slat, resolution)
-+        meshes, subs = self.decode_shape_slat(shape_slat, resolution, retain_quads=retain_quads)
-         tex_voxels = self.decode_tex_slat(tex_slat, subs)
-         out_mesh = []
-         torch.cuda.synchronize()
-         for m, v in zip(meshes, tex_voxels):
--            m.fill_holes()
--            out_mesh.append(
--                MeshWithVoxel(
--                    m.vertices, m.faces,
--                    origin = [-0.5, -0.5, -0.5],
--                    voxel_size = 1 / resolution,
--                    coords = v.coords[:, 1:],
--                    attrs = v.feats,
--                    voxel_shape = torch.Size([*v.shape, *v.spatial_shape]),
--                    layout=self.pbr_attr_layout
--                )
-+            if not retain_quads:
-+                m.fill_holes()
-+            item = MeshWithVoxel(
-+                m.vertices, m.faces,
-+                origin = [-0.5, -0.5, -0.5],
-+                voxel_size = 1 / resolution,
-+                coords = v.coords[:, 1:],
-+                attrs = v.feats,
-+                voxel_shape = torch.Size([*v.shape, *v.spatial_shape]),
-+                layout=self.pbr_attr_layout
-             )
-+            if retain_quads:
-+                item.quad_faces = m.quad_faces
-+            out_mesh.append(item)
-         return out_mesh
-@@ -620,4 +627,7 @@ class Pixal3DImageTo3DPipeline(Pipeline):
+@@ -619,6 +619,8 @@
+         return_latent: bool = False,
          pipeline_type: Optional[str] = None,
          max_num_tokens: int = 49152,
 +        *,
 +        stage_finished: Optional[Callable[[str], None]] = None,
-+        retain_quads: bool = False,
      ) -> List[MeshWithVoxel]:
          """
-@@ -639,4 +649,5 @@ class Pixal3DImageTo3DPipeline(Pipeline):
+         Run the Pixal3D pipeline (proj mode, cascade).
+@@ -638,6 +640,7 @@
+             return_latent (bool): Whether to return the latent codes.
              pipeline_type (str): The type of the pipeline. Options: '1024_cascade', '1536_cascade'.
              max_num_tokens (int): The maximum number of tokens to use.
 +            stage_finished: Optional callback after each generation stage.
          """
          # Check pipeline type
-@@ -685,4 +696,6 @@ class Pixal3DImageTo3DPipeline(Pipeline):
+         pipeline_type = pipeline_type or self.default_pipeline_type
+@@ -684,6 +687,8 @@
+         )
          del cond_ss
          torch.cuda.empty_cache()
 +        if stage_finished is not None:
 +            stage_finished("sparse_structure")
 
          # ---- Stage 2: Shape LR 512 (proj) ----
-@@ -699,4 +712,6 @@ class Pixal3DImageTo3DPipeline(Pipeline):
+         cond_shape_lr = self.get_proj_cond_shape(
+@@ -698,6 +703,8 @@
+         )
          del cond_shape_lr
          torch.cuda.empty_cache()
 +        if stage_finished is not None:
 +            stage_finished("shape_low")
 
          # ---- Stage 3a: Upsample LR → HR ----
-@@ -708,4 +723,6 @@ class Pixal3DImageTo3DPipeline(Pipeline):
+         if self.low_vram:
+@@ -707,6 +714,8 @@
+         if self.low_vram:
              self.models['shape_slat_decoder'].cpu()
              self.models['shape_slat_decoder'].low_vram = False
 +        if stage_finished is not None:
 +            stage_finished("shape_decoder_upsample")
 
          lr_resolution = 512
-@@ -726,4 +743,6 @@ class Pixal3DImageTo3DPipeline(Pipeline):
+         actual_hr_resolution = hr_resolution
+@@ -725,6 +734,8 @@
+         actual_grid_res = actual_hr_resolution // 16
          del lr_slat, hr_coords, quant_coords
          torch.cuda.empty_cache()
 +        if stage_finished is not None:
 +            stage_finished("shape_quantize")
 
          # ---- Stage 3b: Shape HR (proj) ----
-@@ -758,4 +777,6 @@ class Pixal3DImageTo3DPipeline(Pipeline):
+         cond_shape_hr = self.get_proj_cond_shape(
+@@ -757,6 +768,8 @@
+         shape_slat = hr_slat * std + mean
          del cond_shape_hr, noise_hr, hr_slat, hr_coords_unique
          torch.cuda.empty_cache()
 +        if stage_finished is not None:
 +            stage_finished("shape_high")
 
          # ---- Stage 4: Texture (proj) ----
-@@ -774,8 +795,12 @@ class Pixal3DImageTo3DPipeline(Pipeline):
+         tex_grid_res = actual_hr_resolution // 16
+@@ -773,10 +786,14 @@
+         )
          del cond_tex
          torch.cuda.empty_cache()
 +        if stage_finished is not None:
@@ -165,12 +90,12 @@ index 7129482..db8dae7 100644
 
          # ---- Stage 5: Decode ----
          res = actual_hr_resolution
--        out_mesh = self.decode_latent(shape_slat, tex_slat, res)
-+        out_mesh = self.decode_latent(shape_slat, tex_slat, res, retain_quads=retain_quads)
+         out_mesh = self.decode_latent(shape_slat, tex_slat, res)
 +        if stage_finished is not None:
 +            stage_finished("decode")
          if return_latent:
              return out_mesh, (shape_slat, tex_slat, res)
+         else:
 diff --git a/pixal3d/trainers/flow_matching/mixins/image_conditioned_proj.py b/pixal3d/trainers/flow_matching/mixins/image_conditioned_proj.py
 index 0f721e0..f5d67e7 100644
 --- a/pixal3d/trainers/flow_matching/mixins/image_conditioned_proj.py

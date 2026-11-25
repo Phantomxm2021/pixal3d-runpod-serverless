@@ -19,7 +19,7 @@ if __name__ == '__main__':
     print('[startup] Runpod SDK imported', flush=True)
 
 from handler import handler as handle_job
-from scripts.model_cache import use_global_volume, use_runpod_model_cache
+from scripts.model_cache import use_global_volume
 
 
 def handler(job):
@@ -37,14 +37,5 @@ def handler(job):
 
 
 if __name__ == '__main__':
-    global_volume = use_global_volume()
-    model_cache = use_runpod_model_cache()
-    if os.environ.get('RUNPOD_WEBHOOK_GET_JOB') and not (global_volume or model_cache):
-        # Preload the GPU models before accepting queued jobs.
-        print('[startup] Preloading models before SDK registration', flush=True)
-        from inference_worker import prepare_models
-
-        prepare_models()
-
-    print(f'[startup] Registering handler with Runpod SDK (global_volume={global_volume}, model_cache={model_cache})', flush=True)
+    print(f'[startup] Registering handler with Runpod SDK (global_volume={use_global_volume()})', flush=True)
     runpod.serverless.start({'handler': handler })

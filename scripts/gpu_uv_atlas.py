@@ -3,7 +3,7 @@
 import torch
 
 
-def unwrap_gpu(vertices, faces, texture_size: int, *, preserve_faces: bool = False):
+def unwrap_gpu(vertices, faces, texture_size: int):
     from sprint3d_uv import AtlasConfig, SegmentConfig, build_atlas, face_normals_areas, segment_charts
 
     points = vertices.float().contiguous()
@@ -19,10 +19,8 @@ def unwrap_gpu(vertices, faces, texture_size: int, *, preserve_faces: bool = Fal
     valid = area > 0
     if not valid.any().item():
         raise ValueError("UV unwrapping requires a mesh with positive surface area.")
-    if not preserve_faces:
-        # The GLB decimator can leave zero-area triangles. Native USDZ topology
-        # retains its original triangle pairs for the downstream quad mapper.
-        faces = faces[valid]
+    # The GLB decimator can leave zero-area triangles.
+    faces = faces[valid]
     stats = {}
     labels = segment_charts(points, faces, SegmentConfig(), stats)
     result = build_atlas(points, faces, labels, texture_size, AtlasConfig(), stats)

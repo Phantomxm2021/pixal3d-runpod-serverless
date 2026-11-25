@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 import shutil
 import tempfile
@@ -12,13 +13,10 @@ from pathlib import Path
 from scripts.model_cache import (
     DINO_MODEL_NAME,
     GLOBAL_MODEL_ROOT,
-    MOGE_MODEL_NAME,
     NAF_CHECKPOINT,
     NAF_CHECKPOINT_URL,
-    PIXAL3D_MODEL_NAME,
     RUNPOD_VOLUME,
     configure_cache,
-    pipeline_checkpoint_files,
 )
 
 
@@ -36,18 +34,12 @@ def stage_dinov3(source: Path, scratch: Path) -> Iterator[Path]:
         yield staged
 
 
-def verify_global_models(root: Path, *, include_pipeline: bool = True) -> dict[str, int]:
+def verify_global_models(root: Path) -> dict[str, int]:
     try:
         sizes = json.loads((root / MANIFEST).read_text(encoding="utf-8"))
-        expected = {"moge/model.pt", NAF_CHECKPOINT, *(f"dinov3/{name}" for name in DINO_FILES)}
+        expected = {NAF_CHECKPOINT, *(f"dinov3/{name}" for name in DINO_FILES)}
         if not isinstance(sizes, dict):
             raise ValueError("Model manifest must be an object.")
-        if include_pipeline:
-            pipeline = json.loads((root / "pixal3d/pipeline.json").read_text(encoding="utf-8"))
-            expected.add("pixal3d/pipeline.json")
-            expected.update(f"pixal3d/{name}" for name in pipeline_checkpoint_files(pipeline))
-        if include_pipeline and set(sizes) != expected:
-            raise ValueError("Model manifest lists an unexpected set of files.")
         verified = {}
         for name in sorted(expected):
             size = sizes.get(name)
@@ -57,17 +49,20 @@ def verify_global_models(root: Path, *, include_pipeline: bool = True) -> dict[s
             verified[name] = size
         return verified
     except (OSError, TypeError, ValueError, KeyError) as exc:
-        raise RuntimeError(f"Global Volume model files are incomplete. Run prefill_models first: {exc}") from exc
+        raise RuntimeError(f"Global Volume model files are incomplete. Run scripts.prefetch_models on the attached volume first: {exc}") from exc
 
 
-def _stream_file(url: str, destination: Path, *, size: int | None, headers: dict | None = None) -> int:
+def _stream_file(
+    url: str, destination: Path, *, size: int | None, headers: dict | None = None, sha256: str | None = None,
+) -> int:
     import requests
 
-    if size is not None and destination.is_file() and destination.stat().st_size == size:
+    if sha256 is None and size is not None and destination.is_file() and destination.stat().st_size == size:
         return size
     destination.parent.mkdir(parents=True, exist_ok=True)
     print(f"[prefill] downloading {destination.name}", flush=True)
     written = 0
+    digest = hashlib.sha256() if sha256 is not None else None
     try:
         with requests.get(url, headers=headers, stream=True, timeout=(15, 60)) as response:
             if not response.ok:
@@ -77,16 +72,20 @@ def _stream_file(url: str, destination: Path, *, size: int | None, headers: dict
             with destination.open("wb") as output:
                 for chunk in response.iter_content(chunk_size=1024 * 1024):
                     written += output.write(chunk)
+                    if digest is not None:
+                        digest.update(chunk)
     except requests.RequestException:
         raise RuntimeError(f"Download interrupted for {destination.name}") from None
     if not written or (size is not None and written != size):
         raise RuntimeError(f"Incomplete download for {destination.name}: {written} bytes")
+    if digest is not None and digest.hexdigest() != sha256:
+        raise RuntimeError(f"Unexpected SHA-256 for {destination.name}")
     return written
 
 
 def prefill_global_models() -> dict:
     if not RUNPOD_VOLUME.is_mount():
-        raise RuntimeError(f"Attach a Global Volume at {RUNPOD_VOLUME} before running prefill_models.")
+        raise RuntimeError(f"Attach a Global Volume at {RUNPOD_VOLUME} before preparing auxiliary models.")
     configure_cache()
     root = GLOBAL_MODEL_ROOT
     try:
@@ -102,32 +101,19 @@ def _download_models(root: Path) -> dict[str, int]:
 
     api = HfApi()
     headers = build_hf_headers()
+    repo = DINO_MODEL_NAME
+    info = api.model_info(repo, files_metadata=True, timeout=30)
+    available = {entry.rfilename: entry.size for entry in info.siblings}
     sizes = {}
-    for folder, repo, files in (
-        ("pixal3d", PIXAL3D_MODEL_NAME, ("pipeline.json",)),
-        ("moge", MOGE_MODEL_NAME, ("model.pt",)),
-        ("dinov3", DINO_MODEL_NAME, DINO_FILES),
-    ):
-        info = api.model_info(repo, files_metadata=True)
-        available = {entry.rfilename: entry.size for entry in info.siblings}
-
-        def download_files(names):
-            for name in names:
-                if name not in available or not available[name]:
-                    raise RuntimeError(f"Cannot determine file size for {repo}/{name}")
-                relative = f"{folder}/{name}"
-                sizes[relative] = _stream_file(
-                    hf_hub_url(repo, name, revision=info.sha), root / relative,
-                    size=available[name], headers=headers,
-                )
-
-        download_files(files)
-        if folder == "pixal3d":
-            config = json.loads((root / "pixal3d/pipeline.json").read_text(encoding="utf-8"))
-            download_files(pipeline_checkpoint_files(config))
+    for name in DINO_FILES:
+        if not available.get(name):
+            raise RuntimeError(f"Cannot determine file size for {repo}/{name}")
+        relative = f"dinov3/{name}"
+        sizes[relative] = _stream_file(
+            hf_hub_url(repo, name, revision=info.sha), root / relative,
+            size=available[name], headers=headers,
+        )
 
     sizes[NAF_CHECKPOINT] = _stream_file(NAF_CHECKPOINT_URL, root / NAF_CHECKPOINT, size=None)
-    # Publish the manifest only after every file closes successfully. A retry
-    # can reuse finished Hugging Face files without writing symlinks or locks.
     (root / MANIFEST).write_text(json.dumps(sizes), encoding="utf-8")
     return verify_global_models(root)

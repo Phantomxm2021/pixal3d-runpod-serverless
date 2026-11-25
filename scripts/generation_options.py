@@ -3,7 +3,7 @@
 from dataclasses import dataclass
 from math import pi, radians
 
-from scripts.mesh_options import DEFAULT_GENERATION_TRIANGLES, glb_options, texture_size, triangle_budget
+from scripts.mesh_options import DEFAULT_GENERATION_TRIANGLES, glb_options
 
 SAMPLERS = ("sparse_structure_sampler_params", "shape_slat_sampler_params", "tex_slat_sampler_params")
 SAMPLER_NUMBERS = {
@@ -91,24 +91,19 @@ class GenerationOptions:
     texture_format: str
     low_vram: bool
     num_samples: int
-    white_mesh: bool = False
 
 
-def generation_options(inputs: dict, *, asset_format: str, white_mesh: bool = False) -> GenerationOptions:
-    pipeline_types = {512: "512", **CASCADE_TYPES} if white_mesh else CASCADE_TYPES
-    choices = "512, 1024 or 1536" if white_mesh else "1024 or 1536"
+def generation_options(inputs: dict) -> GenerationOptions:
     resolution = inputs.get("resolution")
-    pipeline_type = inputs.get("pipeline_type", "512" if white_mesh else "1024_cascade")
-    if pipeline_type not in pipeline_types.values():
-        choices_text = "512, 1024_cascade or 1536_cascade" if white_mesh else "1024_cascade or 1536_cascade"
-        raise ValueError(f"input.pipeline_type must be {choices_text}.")
+    pipeline_type = inputs.get("pipeline_type", "1024_cascade")
+    if pipeline_type not in CASCADE_TYPES.values():
+        raise ValueError("input.pipeline_type must be 1024_cascade or 1536_cascade.")
     if "resolution" in inputs:
-        if type(resolution) is not int or resolution not in pipeline_types:
-            raise ValueError(f"input.resolution must be {choices}.")
-        if "pipeline_type" in inputs and pipeline_type != pipeline_types[resolution]:
-            description = "resolution" if white_mesh else "cascade"
-            raise ValueError(f"input.resolution and input.pipeline_type must specify the same {description}.")
-        pipeline_type = pipeline_types[resolution]
+        if type(resolution) is not int or resolution not in CASCADE_TYPES:
+            raise ValueError("input.resolution must be 1024 or 1536.")
+        if "pipeline_type" in inputs and pipeline_type != CASCADE_TYPES[resolution]:
+            raise ValueError("input.resolution and input.pipeline_type must specify the same cascade.")
+        pipeline_type = CASCADE_TYPES[resolution]
     pipeline = {
         "pipeline_type": pipeline_type,
         # Upstream uses this as a fallback threshold while above 1024.
@@ -117,37 +112,20 @@ def generation_options(inputs: dict, *, asset_format: str, white_mesh: bool = Fa
     }
     low_vram = _boolean(inputs, "low_vram", False)
     num_samples = _number(inputs.get("num_samples", 1), "input.num_samples", 1, 4, integer=True)
-    if white_mesh:
-        textured_options = (
-            "texture_size", "texture_format", "tex_slat_sampler_params", "uv_backend",
-            "remesh", "remesh_band", "remesh_project", "postprocess_verbose",
-        )
-        if any(name in inputs for name in textured_options) or any(name.startswith("mesh_cluster_") for name in inputs):
-            raise ValueError("White mesh generation supports triangle budgets and exports geometry without UVs or materials.")
-        target = triangle_budget(inputs, default_triangles=DEFAULT_GENERATION_TRIANGLES, max_triangles=1_000_000)
-        return GenerationOptions(
-            pipeline, _camera_options(inputs), {"decimation_target": target}, "", low_vram, num_samples, white_mesh=True,
-        )
-
-    texture_format = inputs.get("texture_format", "webp" if asset_format == "glb" else "png")
-    if asset_format == "glb":
-        if texture_format not in ("webp", "png"):
-            raise ValueError("input.texture_format must be webp or png for GLB.")
-        target, size = glb_options(inputs, default_triangles=DEFAULT_GENERATION_TRIANGLES, max_triangles=1_000_000)
-        remesh = _boolean(inputs, "remesh", True)
-        if not remesh and ("remesh_band" in inputs or "remesh_project" in inputs):
-            raise ValueError("input.remesh_band and input.remesh_project require remesh=true.")
-        postprocess = {
-            "decimation_target": target,
-            "texture_size": size,
-            "remesh": remesh,
-            "remesh_band": _number(inputs.get("remesh_band", 1), "input.remesh_band", 0.25, 4),
-            "remesh_project": _number(inputs.get("remesh_project", 0), "input.remesh_project", 0, 1),
-        }
-    else:
-        if texture_format != "png" or any(name in inputs for name in ("target_triangles", "remesh", "remesh_band", "remesh_project")):
-            raise ValueError("USDZ uses PNG and retains the source quads. GLB is required for remeshing and triangle targets.")
-        postprocess = {"texture_size": texture_size(inputs), "remesh": True}
+    texture_format = inputs.get("texture_format", "webp")
+    if texture_format not in ("webp", "png"):
+        raise ValueError("input.texture_format must be webp or png for GLB.")
+    target, size = glb_options(inputs, default_triangles=DEFAULT_GENERATION_TRIANGLES, max_triangles=1_000_000)
+    remesh = _boolean(inputs, "remesh", True)
+    if not remesh and ("remesh_band" in inputs or "remesh_project" in inputs):
+        raise ValueError("input.remesh_band and input.remesh_project require remesh=true.")
+    postprocess = {
+        "decimation_target": target,
+        "texture_size": size,
+        "remesh": remesh,
+        "remesh_band": _number(inputs.get("remesh_band", 1), "input.remesh_band", 0.25, 4),
+        "remesh_project": _number(inputs.get("remesh_project", 0), "input.remesh_project", 0, 1),
+    }
 
     uv_defaults = (
         ("mesh_cluster_threshold_cone_half_angle_rad", pi / 2, 0.01, pi, False),
@@ -156,7 +134,7 @@ def generation_options(inputs: dict, *, asset_format: str, white_mesh: bool = Fa
         ("mesh_cluster_smooth_strength", 1, 0, 10, False),
     )
     custom_uv = any(name in inputs for name, *_ in uv_defaults)
-    default_uv_backend = "sprint3d" if asset_format == "glb" and not custom_uv else "legacy"
+    default_uv_backend = "sprint3d" if not custom_uv else "legacy"
     uv_backend = inputs.get("uv_backend", default_uv_backend)
     if uv_backend not in ("sprint3d", "legacy"):
         raise ValueError("input.uv_backend must be sprint3d or legacy.")

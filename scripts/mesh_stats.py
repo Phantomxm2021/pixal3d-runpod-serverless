@@ -30,4 +30,11 @@ def glb_stats(path: Path) -> dict[str, int]:
             triangles += index_count // 3
     if not vertices or not triangles:
         raise ValueError("The exported GLB contains no mesh.")
-    return {"triangle_count": triangles, "vertex_count": vertices, "size_bytes": size}
+    textures = document.get("textures", [])
+    pbr_materials = [
+        material["pbrMetallicRoughness"] for material in document.get("materials", [])
+        if "pbrMetallicRoughness" in material
+    ]
+    if not textures or not any("baseColorTexture" in material for material in pbr_materials):
+        raise ValueError("The exported GLB has no base color texture.")
+    return {"triangle_count": triangles, "vertex_count": vertices, "size_bytes": size, "texture_count": len(textures)}

@@ -1,0 +1,26 @@
+diff --git a/pixal3d/models/__init__.py b/pixal3d/models/__init__.py
+--- a/pixal3d/models/__init__.py
++++ b/pixal3d/models/__init__.py
+@@ -48,6 +48,22 @@
+     import json
+     from time import monotonic
+     from safetensors.torch import load_file
++    gguf_path = f"{path}.gguf"
++    if os.path.isfile(gguf_path):
++        from scripts.gguf_weights import load_gguf_weights
++
++        with open(f"{path}.json", "r") as file:
++            config = json.load(file)
++        started = monotonic()
++        model = __getattr__(config["name"])(**config["args"], **kwargs)
++        if load_timing is not None:
++            load_timing("construct", monotonic() - started)
++        started = monotonic()
++        load_gguf_weights(model, gguf_path)
++        if load_timing is not None:
++            load_timing("gguf_decode", monotonic() - started)
++        return model
++
+     is_local = os.path.exists(f"{path}.json") and os.path.exists(f"{path}.safetensors")
+
+     if is_local:
